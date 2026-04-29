@@ -214,18 +214,35 @@ def run():
             k = kb.get_key()
             intent = _intent_for_key(k)
 
+            # An active unpair confirmation outranks any permission
+            # prompt: pressing Y here means "yes, wipe me", not "yes,
+            # approve the pending tool call". The unpair_pending()
+            # check is also where the protocol layer rolls over the
+            # 30s timeout, so we want it called every loop iteration
+            # regardless of what key (if any) was pressed.
+            unpair_active = proto.unpair_pending()
+
             if intent == _INTENT_APPROVE:
-                if not proto.send_permission("once"):
+                if unpair_active:
+                    proto.confirm_unpair()
+                elif not proto.send_permission("once"):
                     ui.flash_toast("Y: no prompt", buddy_ui.GRAY_DIM)
                     ui.update_footer(state.stats(), _stub_battery())
                 last_toast_ms = time.ticks_ms()
             elif intent == _INTENT_DENY:
-                if not proto.send_permission("deny"):
+                if unpair_active:
+                    proto.cancel_unpair()
+                elif not proto.send_permission("deny"):
                     ui.flash_toast("N: no prompt", buddy_ui.GRAY_DIM)
                 last_toast_ms = time.ticks_ms()
             elif intent == _INTENT_QUIT:
                 # Break out so the `finally` block tears BLE down
-                # cleanly before we reboot back to the launcher.
+                # cleanly before we reboot back to the launcher. If
+                # an unpair is pending, leaving without confirming
+                # cancels it on the device side; the host already has
+                # an "ok:false,pending:true" ack and a subsequent
+                # disconnect will tell it the request didn't go
+                # through.
                 return
 
             now = time.ticks_ms()

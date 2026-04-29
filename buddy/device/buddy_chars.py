@@ -1,4 +1,4 @@
-"""Receive character packs pushed from the desktop.
+"""Receive character packs pushed from the desktop — DISABLED.
 
 Protocol (excerpt from REFERENCE.md):
     {"cmd":"char_begin","name":"luna"}
@@ -8,18 +8,30 @@ Protocol (excerpt from REFERENCE.md):
     {"cmd":"char_begin"} ... next file ...
     {"cmd":"char_end"}
 
-Rules we enforce:
-- Total push <= 1.8 MB. If a single char pack is larger, the desktop
-  lied about the size — reject.
-- No "../" or absolute paths. Strip any backslashes. Everything lands
-  under /flash/buddy/chars/<name>/.
-- A file is only committed (renamed from .part) when file_end arrives.
-  If the transfer breaks mid-stream we clean up .part files next boot.
+**This receiver is gated off on the UIFlow 2.0 build.** The BLE link
+is unauthenticated (see ``buddy_ble.py`` docstring), so any central
+in range could otherwise drop arbitrary files into
+``/flash/buddy/chars/<name>/``. Path traversal is blocked by
+``_safe_segment`` so an attacker cannot overwrite ``/flash/main.py``
+or other system files, but the residual exposure (flash-fill DoS,
+latent payload staging if any future code adds chars/ to sys.path)
+is enough that we refuse the whole feature until the link is
+authenticated.
 
-This module is deliberately thin; the character-rendering side (which
-would actually display a custom tamagotchi sprite) is future work. For
-now we accept packs and list them so the desktop's "installed chars"
-view shows the right thing.
+``CharReceiver.handle`` returns a refusal ack for every file-push
+command. The dispatch internals below stay in place so a future
+build with link encryption (or an application-layer auth handshake)
+can re-enable file push by removing the early return at the top of
+``handle``.
+
+Sandboxing rules that still apply when this is re-enabled:
+- Total push <= ``MAX_PACK_BYTES``. If a single char pack is larger,
+  the desktop lied about the size — reject.
+- No "../" or absolute paths. Strip any backslashes. Everything
+  lands under /flash/buddy/chars/<name>/.
+- A file is only committed (renamed from .part) when file_end
+  arrives. If the transfer breaks mid-stream we clean up .part
+  files next boot.
 """
 
 try:
@@ -41,7 +53,11 @@ except ImportError:
         _zlib = None
 
 CHARS_ROOT = "/flash/buddy/chars"
-MAX_PACK_BYTES = 1_800_000
+# Belt-and-suspenders ceiling. Even with handle() rejecting up front,
+# anyone re-enabling the receiver later without thinking about the cap
+# is forced to confront it: 0 bytes means literally nothing accepted.
+# Set to a sane positive value (e.g. 1_800_000) when re-enabling.
+MAX_PACK_BYTES = 0
 
 
 def _safe_segment(p: str) -> str:
@@ -77,18 +93,23 @@ class CharReceiver:
         self._bytes_this_pack = 0
 
     def handle(self, msg: dict) -> dict:
-        """Dispatch one decoded JSON message. Returns an ack dict or {}."""
+        """Dispatch one decoded JSON message. Returns an ack dict or {}.
+
+        File-push is refused on the unauthenticated UIFlow 2.0 link;
+        every char_*/file/chunk/file_end command gets a structured
+        refusal so the desktop can render a clear error rather than
+        silently retrying. To re-enable on a build with link auth,
+        remove the early-return block below.
+        """
         cmd = msg.get("cmd")
-        if cmd == "char_begin":
-            return self._begin_char(msg)
-        if cmd == "file":
-            return self._begin_file(msg)
-        if cmd == "chunk":
-            return self._chunk(msg)
-        if cmd == "file_end":
-            return self._end_file(msg)
-        if cmd == "char_end":
-            return self._end_char(msg)
+        if cmd in ("char_begin", "file", "chunk", "file_end", "char_end"):
+            return {
+                "ack": cmd,
+                "ok": False,
+                "err": "file push disabled on unauthenticated link",
+            }
+        # Unreachable on this build (handle() is only called for the
+        # gated cmds above), but kept for parity with future re-enable:
         return {}
 
     def _begin_char(self, msg):
