@@ -41,7 +41,6 @@ python3 scripts/repl_run.py --port /dev/cu.usbmodem1101 --cmd "import os; print(
 ## References
 
 - `references/` — BLE protocol notes for the Claude Buddy app
-- `device-basic-archive/` — older port targeting M5Stack Basic (CH9102, three-button UI); kept for reference, not built anymore
 
 ## License
 
