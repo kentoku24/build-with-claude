@@ -86,6 +86,23 @@ _W = 240
 _H = 135
 
 
+def _has_cjk(s: str) -> bool:
+    """True if s contains any character outside the DejaVu9 Latin range."""
+    return any(ord(c) > 0x7E for c in s)
+
+
+def _set_font_auto(text: str) -> int:
+    """Set EFontJA24 for CJK text, DejaVu9 otherwise. Returns px height."""
+    if _has_cjk(text):
+        try:
+            _LCD.setFont(_LCD.FONTS.EFontJA24)
+            return 24
+        except AttributeError:
+            pass
+    _LCD.setFont(_LCD.FONTS.DejaVu9)
+    return 10
+
+
 def _right(y: int, pad: int, text: str) -> int:
     """Cursor X so `text` ends `pad` px from the right edge."""
     return _W - pad - _LCD.textWidth(text)
@@ -113,6 +130,10 @@ class BuddyUI:
         self._prompt = None
         self._identity_name = "Buddy"
         self._identity_owner = ""
+        # Cache last footer values so _draw_connected_main can repaint
+        # the footer after _draw_main's fillRect wipes y=96..110.
+        self._last_stats = {}
+        self._last_battery = {}
         _LCD.fillScreen(BLACK)
         # setFont is sticky across setTextSize calls, so we pick
         # DejaVu9 once at init. Wrapped in try/except so a future
@@ -184,6 +205,8 @@ class BuddyUI:
             self._draw_identity()
 
     def update_footer(self, stats: dict, battery: dict):
+        self._last_stats = stats
+        self._last_battery = battery
         # Stats footer only appears during the connected layout.
         if self._connection_state not in ("advertising", "disconnected"):
             self._draw_footer(stats, battery)
@@ -289,7 +312,12 @@ class BuddyUI:
         _LCD.fillRect(0, 24, _W, 14, BLACK)
         _LCD.setTextSize(1)
         _LCD.setTextColor(ORANGE, BLACK)
+        h = _set_font_auto(name)
         _LCD.drawString(name, 6, 26)
+        if h > 10:
+            # CJK name rendered at 24 px; no room in the 14 px band for owner.
+            _LCD.setFont(_LCD.FONTS.DejaVu9)
+            return
         if owner:
             _LCD.setTextColor(GRAY_MID, BLACK)
             # Place owner text just after name with an 8 px gutter.
@@ -302,9 +330,20 @@ class BuddyUI:
             _LCD.drawString(suffix, x, 26)
 
     def _draw_main(self):
-        # Clear from just under the header hairline down to just above
-        # the hint strip hairline — leaves those dividers intact.
-        _LCD.fillRect(0, 21, _W, 90, BLACK)
+        # In connected state: clear only the content band (y=21..95),
+        # leaving the footer band (y=96..110) untouched. This prevents
+        # rapid heartbeats from flickering the footer black — the footer
+        # is only written by explicit _draw_footer calls via update_footer.
+        # In all other states: clear the full band including the footer,
+        # since those layouts own the entire area.
+        if (
+            not self._unpair_prompt
+            and self._passkey is None
+            and self._connection_state not in ("advertising", "disconnected")
+        ):
+            _LCD.fillRect(0, 21, _W, 75, BLACK)  # y=21..95, footer spared
+        else:
+            _LCD.fillRect(0, 21, _W, 90, BLACK)  # y=21..110, full clear
         # Overlays take precedence over the layout under them. The
         # unpair prompt outranks the passkey because they should never
         # both be live at once (passkey only fires during a real
@@ -361,10 +400,20 @@ class BuddyUI:
         else:
             msg = hb.get("msg", "")
             if msg:
+                h = _set_font_auto(msg)
                 _LCD.setTextColor(GRAY_MID, BLACK)
                 while _LCD.textWidth(msg) > _W - 12 and len(msg) > 1:
                     msg = msg[:-1]
                 _LCD.drawString(msg, 6, 74)
+                if h > 10:
+                    _LCD.setFont(_LCD.FONTS.DejaVu9)
+        # After an overlay (passkey/unpair) exits back to connected,
+        # _draw_main used the full-clear fillRect which wiped the footer.
+        # Restore it now — but only when no prompt is active, because
+        # the prompt box (y=74..108) overlaps the footer band (y=96..110)
+        # and drawing footer text inside the box would corrupt it visually.
+        if not self._prompt and (self._last_stats or self._last_battery):
+            self._draw_footer(self._last_stats, self._last_battery)
 
     def _draw_prompt_box(self, prompt: dict):
         # Orange-bordered box for the pending permission. y=74..109
@@ -377,14 +426,22 @@ class BuddyUI:
         _LCD.setTextSize(1)
         _LCD.setTextColor(ORANGE, BLACK)
         tool_line = "PERM: " + prompt.get("tool", "?")
+        h_tool = _set_font_auto(tool_line)
         while _LCD.textWidth(tool_line) > _W - 14 and len(tool_line) > 1:
             tool_line = tool_line[:-1]
         _LCD.drawString(tool_line, 7, 78)
+        if h_tool > 10:
+            _LCD.setFont(_LCD.FONTS.DejaVu9)
         hint = prompt.get("hint", "")
+        h_hint = _set_font_auto(hint)
         _LCD.setTextColor(CREAM, BLACK)
+        # CJK hint at 24 px: shift up so it fits in the box (y+24 <= 109).
+        hint_y = 82 if h_hint > 10 else 94
         while _LCD.textWidth(hint) > _W - 14 and len(hint) > 1:
             hint = hint[:-1]
-        _LCD.drawString(hint, 7, 94)
+        _LCD.drawString(hint, 7, hint_y)
+        if h_hint > 10:
+            _LCD.setFont(_LCD.FONTS.DejaVu9)
 
     def _draw_unpair_overlay(self):
         if not self._unpair_prompt:
