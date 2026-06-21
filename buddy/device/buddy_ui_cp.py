@@ -196,10 +196,22 @@ class BuddyUI:
         prev_pending = bool(self._prompt)
         self._last = hb
         self._prompt = hb.get("prompt")
-        self._draw_main()
-        # Hint strip content depends on prompt-pending state; repaint
-        # when it flips so the Y/N keys surface only when useful.
-        if bool(self._prompt) != prev_pending:
+        curr_pending = bool(self._prompt)
+        # Steady-state connected heartbeat: skip the full clear+redraw in
+        # _draw_main and just update the bar rows in-place.  This eliminates
+        # the black flash that _draw_main's fillRect causes on every tick.
+        # Fall through to _draw_main only on transitions (prompt appear/
+        # disappear) or non-connected states, where a full repaint is needed.
+        if (
+            self._connection_state not in ("advertising", "disconnected")
+            and self._passkey is None
+            and not self._unpair_prompt
+            and curr_pending == prev_pending
+        ):
+            self._draw_data_rows()
+        else:
+            self._draw_main()
+        if curr_pending != prev_pending:
             self.restore_button_hints()
 
     def update_identity(self, name: str, owner: str):
@@ -377,35 +389,60 @@ class BuddyUI:
         _LCD.drawString("and pick this one", 6, 84)
 
     def _draw_bar(self, label: str, pct: int, y: int):
-        """Draw a labeled horizontal progress bar. pct=100 means full (all remaining)."""
+        """Draw a labeled horizontal progress bar. pct=100 means full (all remaining).
+
+        Draws the filled and empty portions of the bar in a single pass (no
+        intermediate full-gray state) to avoid visible flicker on in-place
+        updates.  The percentage text area is always cleared to a fixed width
+        before writing so variable-width strings ("9%" vs "100%") don't leave
+        stale pixels from a previous wider value.
+        """
+        pct = max(0, min(100, pct))
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
         _LCD.drawString(label, 6, y)
-        pct_str = "{}%".format(max(0, min(100, pct)))
+        # Clear a 36 px slot at the right edge for the pct label so that
+        # a shorter string ("9%") always overwrites a longer one ("100%").
+        _LCD.fillRect(_W - 38, y, 32, 10, BLACK)
+        pct_str = "{}%".format(pct)
         _LCD.setTextColor(WHITE, BLACK)
         _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
         bar_y = y + 13
         bar_w = _W - 12
-        _LCD.fillRect(6, bar_y, bar_w, 8, GRAY_DIM)
-        fill_w = int(bar_w * max(0, min(100, pct)) // 100)
+        fill_w = int(bar_w * pct // 100)
+        color = GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
+        # Draw filled portion then empty portion in one pass — never shows
+        # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
-            color = GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
             _LCD.fillRect(6, bar_y, fill_w, 8, color)
+        if fill_w < bar_w:
+            _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
 
-    def _draw_connected_main(self):
-        self._draw_identity()
+    def _data_pcts(self):
+        """Return (h5_pct, wk_pct) from the last heartbeat."""
         hb = self._last
         used_5h = hb.get("tokens", 0)
         used_today = hb.get("tokens_today", 0)
         h5_pct = max(0, 100 - used_5h * 100 // max(1, _LIMIT_5H))
         wk_pct = max(0, 100 - used_today * 7 * 100 // max(1, _LIMIT_WEEK))
-        # 5h bar always visible; week bar only when no prompt (prompt box
-        # occupies y=74..109 and would overlap the second bar).
+        return h5_pct, wk_pct
+
+    def _draw_data_rows(self):
+        """Update usage bars in-place without clearing the full content area.
+
+        Called on every steady-state heartbeat instead of _draw_main so the
+        screen never goes black between ticks.
+        """
+        h5_pct, wk_pct = self._data_pcts()
         self._draw_bar("5h remaining", h5_pct, 40)
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
             self._draw_bar("Week remaining", wk_pct, 64)
+
+    def _draw_connected_main(self):
+        self._draw_identity()
+        self._draw_data_rows()
         # After an overlay exits back to connected, _draw_main's full-clear
         # fillRect wiped the footer — restore it, but not while a prompt box
         # (y=74..108) overlaps the footer band (y=96..110).
