@@ -85,6 +85,10 @@ _LCD = M5.Lcd
 _W = 240
 _H = 135
 
+# Approximate token limits for usage bars.  Adjust to match your plan.
+_LIMIT_5H = 1_000_000   # tokens per 5-hour window  (maps to hb["tokens"])
+_LIMIT_WEEK = 7_000_000  # tokens per week           (maps to hb["tokens_today"] * 7)
+
 
 def _has_cjk(s: str) -> bool:
     """True if s contains any character outside the DejaVu9 Latin range."""
@@ -372,46 +376,39 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
+    def _draw_bar(self, label: str, pct: int, y: int):
+        """Draw a labeled horizontal progress bar. pct=100 means full (all remaining)."""
+        _LCD.setTextSize(1)
+        _LCD.setTextColor(GRAY_MID, BLACK)
+        _LCD.drawString(label, 6, y)
+        pct_str = "{}%".format(max(0, min(100, pct)))
+        _LCD.setTextColor(WHITE, BLACK)
+        _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
+        bar_y = y + 13
+        bar_w = _W - 12
+        _LCD.fillRect(6, bar_y, bar_w, 8, GRAY_DIM)
+        fill_w = int(bar_w * max(0, min(100, pct)) // 100)
+        if fill_w > 0:
+            color = GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
+            _LCD.fillRect(6, bar_y, fill_w, 8, color)
+
     def _draw_connected_main(self):
         self._draw_identity()
         hb = self._last
-        _LCD.setTextSize(1)
-        running = hb.get("running", 0)
-        waiting = hb.get("waiting", 0)
-        total = hb.get("total", 0)
-        _LCD.setTextColor(WHITE, BLACK)
-        queue = "Q: {}run {}wait {}tot".format(running, waiting, total)
-        # Clip to screen width so large numbers don't wrap.
-        while _LCD.textWidth(queue) > _W - 12 and len(queue) > 1:
-            queue = queue[:-1]
-        _LCD.drawString(queue, 6, 42)
-        tokens_today = hb.get("tokens_today", 0)
-        _LCD.setTextColor(CYAN, BLACK)
-        tok = "{:,}".format(tokens_today).replace(",", "'")
-        tok_line = "Today: " + tok + " tok"
-        while _LCD.textWidth(tok_line) > _W - 12 and len(tok_line) > 1:
-            tok_line = tok_line[:-1]
-        _LCD.drawString(tok_line, 6, 58)
-        # When a prompt is active the prompt box takes over the lower
-        # third of the panel — skip the generic msg line so they don't
-        # overlap. When no prompt is pending, msg fills the same row.
+        used_5h = hb.get("tokens", 0)
+        used_today = hb.get("tokens_today", 0)
+        h5_pct = max(0, 100 - used_5h * 100 // max(1, _LIMIT_5H))
+        wk_pct = max(0, 100 - used_today * 7 * 100 // max(1, _LIMIT_WEEK))
+        # 5h bar always visible; week bar only when no prompt (prompt box
+        # occupies y=74..109 and would overlap the second bar).
+        self._draw_bar("5h remaining", h5_pct, 40)
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            msg = hb.get("msg", "")
-            if msg:
-                h = _set_font_auto(msg)
-                _LCD.setTextColor(GRAY_MID, BLACK)
-                while _LCD.textWidth(msg) > _W - 12 and len(msg) > 1:
-                    msg = msg[:-1]
-                _LCD.drawString(msg, 6, 74)
-                if h > 10:
-                    _LCD.setFont(_LCD.FONTS.DejaVu9)
-        # After an overlay (passkey/unpair) exits back to connected,
-        # _draw_main used the full-clear fillRect which wiped the footer.
-        # Restore it now — but only when no prompt is active, because
-        # the prompt box (y=74..108) overlaps the footer band (y=96..110)
-        # and drawing footer text inside the box would corrupt it visually.
+            self._draw_bar("Week remaining", wk_pct, 64)
+        # After an overlay exits back to connected, _draw_main's full-clear
+        # fillRect wiped the footer — restore it, but not while a prompt box
+        # (y=74..108) overlaps the footer band (y=96..110).
         if not self._prompt and (self._last_stats or self._last_battery):
             self._draw_footer(self._last_stats, self._last_battery)
 
