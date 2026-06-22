@@ -50,11 +50,11 @@ to size 4 for cross-room readability.
     y=84       "and pick this one"
     y=112..134 hint strip "Q = Exit" (centered)
 
-  Connected with heartbeat:
-    y=0..20    header
-    y=26       identity band (name + owner)
-    y=40       "5h remaining" quota bar (100 - five_h_util)
-    y=64       "Week remaining" quota bar (hidden while a prompt is up)
+  Connected with heartbeat (no identity band — reused for a 3rd bar):
+    y=0..20    header ("Claude Buddy" + status)
+    y=24       "5h" quota bar     (100 - five_h_util)
+    y=48       "Week" quota bar   (100 - week_util)
+    y=72       "Sonnet" quota bar (100 - sonnet_util; hidden while a prompt is up)
     y=74..108  prompt box (when a permission is pending)
     y=112..134 hint strip (Y once / N deny / Q exit columns)
 
@@ -86,16 +86,14 @@ _H = 135
 
 # Usage bars render the *real* Claude quota, which only the host knows.
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
-# coexistence) so it can't query the usage API itself — the host sends
-# the figures in each heartbeat as `five_h_util` / `week_util`:
-# utilization percentages (0..100, "used") copied straight from
-# api.anthropic.com/api/oauth/usage (five_hour.utilization /
-# seven_day.utilization). We draw *remaining* = 100 - utilization.
+# coexistence) so it can't query usage itself — the host companion
+# (scripts/quota_push.py, backed by `codexbar`) sends the figures in each
+# heartbeat as `five_h_util` / `week_util` / `sonnet_util`: utilization
+# percentages (0..100, "used") for the 5-hour, 7-day-all, and 7-day-Sonnet
+# windows. We draw *remaining* = 100 - utilization.
 #
-# These replace the old token-count estimate (hb["tokens"] vs a guessed
-# 1M/7M ceiling), which had no relationship to the real quota — see
-# buddy/references/protocol.md, where `tokens` is "this turn" and
-# `tokens_today` is "today total", neither a 5h-window nor weekly figure.
+# Claude.app's own heartbeat carries none of these, so on that link the
+# bars read "--". See buddy/references/protocol.md.
 
 
 def _has_cjk(s: str) -> bool:
@@ -223,10 +221,11 @@ class BuddyUI:
             self.restore_button_hints()
 
     def update_identity(self, name: str, owner: str):
+        # The connected layout no longer renders an identity band — that
+        # row is reused for the Sonnet bar, and the header already shows
+        # "Claude Buddy". Just remember the values.
         self._identity_name = name or "Buddy"
         self._identity_owner = owner or ""
-        if self._connection_state not in ("advertising", "disconnected"):
-            self._draw_identity()
 
     def update_footer(self, stats: dict, battery: dict):
         self._last_stats = stats
@@ -330,29 +329,6 @@ class BuddyUI:
             return ("OFF", RED)
         return ("ADV", CYAN)
 
-    def _draw_identity(self):
-        name = (self._identity_name or "Buddy")[:22]
-        owner = self._identity_owner or ""
-        _LCD.fillRect(0, 24, _W, 14, BLACK)
-        _LCD.setTextSize(1)
-        _LCD.setTextColor(ORANGE, BLACK)
-        h = _set_font_auto(name)
-        _LCD.drawString(name, 6, 26)
-        if h > 10:
-            # CJK name rendered at 24 px; no room in the 14 px band for owner.
-            _LCD.setFont(_LCD.FONTS.DejaVu9)
-            return
-        if owner:
-            _LCD.setTextColor(GRAY_MID, BLACK)
-            # Place owner text just after name with an 8 px gutter.
-            x = 6 + _LCD.textWidth(name) + 8
-            suffix = "<- " + owner
-            # Clip the owner suffix to whatever fits before the right
-            # margin (the status icon is in the header, not here).
-            while x + _LCD.textWidth(suffix) > _W - 6 and len(suffix) > 1:
-                suffix = suffix[:-1]
-            _LCD.drawString(suffix, x, 26)
-
     def _draw_main(self):
         # In connected state: clear only the content band (y=21..95),
         # leaving the footer band (y=96..110) untouched. This prevents
@@ -436,36 +412,39 @@ class BuddyUI:
             _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
 
     def _data_pcts(self):
-        """Return (h5_remaining, wk_remaining) as 0..100, or None when unknown.
+        """Return (h5, wk, sonnet) remaining % (0..100), each None if unknown.
 
-        `five_h_util` / `week_util` are utilization percentages (0..100,
-        "used") the host copies from the usage API; we display *remaining*,
-        i.e. 100 - utilization. A field that's absent (host hasn't sent a
-        real figure yet, or runs an older build) yields None — the bar then
-        renders a "--" no-data state rather than a fabricated number.
+        `five_h_util` / `week_util` / `sonnet_util` are utilization
+        percentages (0..100, "used") the companion sends from `codexbar`
+        (primary / secondary / tertiary). We display *remaining*, i.e.
+        100 - utilization. An absent field yields None — that bar renders a
+        "--" no-data state rather than a fabricated number.
         """
         hb = self._last
-        h5 = hb.get("five_h_util")
-        wk = hb.get("week_util")
-        h5_pct = None if h5 is None else max(0, min(100, 100 - int(h5)))
-        wk_pct = None if wk is None else max(0, min(100, 100 - int(wk)))
-        return h5_pct, wk_pct
+
+        def _rem(key):
+            v = hb.get(key)
+            return None if v is None else max(0, min(100, 100 - int(v)))
+
+        return _rem("five_h_util"), _rem("week_util"), _rem("sonnet_util")
 
     def _draw_data_rows(self):
-        """Update usage bars in-place without clearing the full content area.
+        """Update the quota bars in-place without clearing the full content
+        area, so the screen never goes black between heartbeats.
 
-        Called on every steady-state heartbeat instead of _draw_main so the
-        screen never goes black between ticks.
+        Three rows (5h / Week / Sonnet) at y=24/48/72 — the identity band
+        was dropped to make vertical room. A pending prompt occupies the
+        Sonnet row's space (prompt box y=74..108), so we hide Sonnet then.
         """
-        h5_pct, wk_pct = self._data_pcts()
-        self._draw_bar("5h remaining", h5_pct, 40)
+        h5, wk, snt = self._data_pcts()
+        self._draw_bar("5h", h5, 24)
+        self._draw_bar("Week", wk, 48)
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            self._draw_bar("Week remaining", wk_pct, 64)
+            self._draw_bar("Sonnet", snt, 72)
 
     def _draw_connected_main(self):
-        self._draw_identity()
         self._draw_data_rows()
         # After an overlay exits back to connected, _draw_main's full-clear
         # fillRect wiped the footer — restore it, but not while a prompt box

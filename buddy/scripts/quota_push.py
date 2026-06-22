@@ -1,17 +1,22 @@
-"""Push the real Claude usage quota to the Cardputer buddy over BLE.
+"""Push real Claude usage quota to the Cardputer buddy over BLE.
 
-The buddy's "5h remaining" / "Week remaining" bars need real quota
-figures, but the device is BLE-only and **Claude.app's Hardware Buddy
-heartbeat carries no quota** (confirmed by live capture — see
-buddy/references/protocol.md). This companion fills that gap: it polls
-the Claude usage API and writes heartbeats containing `five_h_util` /
-`week_util` to the device's Nordic-UART RX characteristic, so the bars
-track the real account quota.
+The buddy's "5h / Week / Sonnet" bars need real quota figures, but the
+device is BLE-only and Claude.app's Hardware Buddy heartbeat carries no
+quota (see buddy/references/protocol.md). This companion fills that gap:
+it reads the quota from **codexbar** and writes heartbeats containing
+`five_h_util` / `week_util` / `sonnet_util` to the device's Nordic-UART
+RX characteristic, so the bars track the real account quota.
 
-    five_h_util = five_hour.utilization   (0..100, "used")
-    week_util   = seven_day.utilization   (0..100, "used")
+Backend: `codexbar --provider anthropic --format json`. Its first array
+entry has `usage.{primary, secondary, tertiary}.usedPercent`:
 
-The device renders *remaining* = 100 - utilization.
+    primary   -> five_h_util   (5-hour window,  windowMinutes 300)
+    secondary -> week_util     (7-day, all,     windowMinutes 10080)
+    tertiary  -> sonnet_util   (7-day, Sonnet,  windowMinutes 10080)
+
+(Mapping verified against the labeled usage API: primary==five_hour,
+secondary==seven_day, tertiary==seven_day_sonnet.) The device renders
+*remaining* = 100 - utilization for each.
 
 ### Connection model (important)
 
@@ -19,26 +24,12 @@ This script is the BLE **central**, exactly like Claude.app. A buddy
 accepts one central at a time, so **while this is connected, Claude.app
 cannot be** — you get the live quota readout but not prompt-approval.
 Run it when you want quota on the desk display; quit it (Ctrl-C) and
-reconnect from Claude.app for the approval workflow. (Simultaneous use
-would need multi-connection support in the device firmware — a future
-enhancement.)
+reconnect from Claude.app for the approval workflow.
 
 ### Requirements
 
-    pip install bleak            # BLE central for macOS/Linux/Windows
-
-macOS Keychain must hold the "Claude Code-credentials" entry (it does
-once you've logged into Claude Code) — same source the `quota-check`
-skill uses. The OAuth token is read fresh on every poll, so token
-refreshes done by Claude Code are picked up automatically.
-
-macOS Bluetooth note: TCC (the privacy permission system) grants
-Bluetooth access **per binary**. Run this from **Terminal.app** (or
-another terminal that has, or will prompt for, Bluetooth permission).
-Launching it indirectly — e.g. from inside another app's Bash subprocess
-— inherits that app's TCC context instead, and CoreBluetooth aborts the
-process with SIGABRT (exit 134) when permission isn't granted to the
-Python binary. `--dry-run` does no BLE and is unaffected.
+    pip install bleak                # BLE central for macOS/Linux/Windows
+    codexbar on PATH, authenticated  # `codexbar --provider anthropic --format json`
 
 ### Usage
 
@@ -47,6 +38,11 @@ Python binary. `--dry-run` does no BLE and is unaffected.
     python quota_push.py --address <UUID> # skip the scan, connect directly
     python quota_push.py --once           # connect, push one sample, exit
     python quota_push.py --dry-run        # fetch+print quota only, no BLE
+
+Run it from **Terminal.app**, not from inside another app's shell —
+macOS Bluetooth permission is per-binary, so an indirectly-launched
+Python aborts with SIGABRT (exit 134). `--dry-run` does no BLE and is
+exempt.
 """
 
 from __future__ import annotations
@@ -56,72 +52,54 @@ import asyncio
 import json
 import subprocess
 import sys
-import urllib.request
 
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-KEYCHAIN_SERVICE = "Claude Code-credentials"
+CODEXBAR_CMD = ["codexbar", "--provider", "anthropic", "--format", "json"]
 DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
 
-def _oauth_token() -> str:
-    """Read the Claude Code OAuth access token from the macOS Keychain.
+def fetch_utilization():
+    """Return (five_h, week, sonnet) utilization % as ints 0..100; any None.
 
-    Mirrors quota-check/get_quota.sh: the keychain item is a JSON blob
-    whose claudeAiOauth.accessToken we want. Read every call so a token
-    refreshed by Claude Code is used without restarting this script.
+    Reads codexbar's JSON and maps usage.primary/secondary/tertiary
+    usedPercent to the 5h / weekly-all / weekly-Sonnet windows.
     """
     try:
-        raw = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, text=True, check=True,
+        out = subprocess.run(
+            CODEXBAR_CMD, capture_output=True, text=True, check=True, timeout=20,
         ).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except FileNotFoundError:
         raise SystemExit(
-            "Could not read '%s' from the Keychain. Log into Claude Code "
-            "first (this is macOS-only; on Linux/Windows adapt _oauth_token)."
-            % KEYCHAIN_SERVICE
+            "codexbar not found on PATH. Install it (e.g. `brew install codexbar`) "
+            "and make sure `codexbar --provider anthropic --format json` works."
         )
-    try:
-        return json.loads(raw).get("claudeAiOauth", {}).get("accessToken", "")
-    except json.JSONDecodeError:
-        raise SystemExit("Keychain entry is not the expected JSON shape.")
+    except subprocess.TimeoutExpired:
+        raise SystemExit("codexbar timed out.")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit("codexbar failed (exit %s): %s" % (e.returncode, (e.stderr or "").strip()))
 
+    data = json.loads(out)
+    if not data:
+        raise RuntimeError("codexbar returned no entries")
+    usage = data[0].get("usage") or {}
 
-def fetch_utilization():
-    """Return (five_h_util, week_util) as ints 0..100, either may be None."""
-    token = _oauth_token()
-    if not token:
-        raise SystemExit("No access token in the Keychain entry.")
-    req = urllib.request.Request(
-        USAGE_URL,
-        headers={
-            "Authorization": "Bearer " + token,
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "claude-code/2.0.32",
-            "Accept": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.load(resp)
-    if "error" in data:
-        raise RuntimeError("usage API error: %s" % data.get("error"))
-
-    def _util(section):
-        block = data.get(section) or {}
-        u = block.get("utilization")
+    def _used(section):
+        block = usage.get(section) or {}
+        u = block.get("usedPercent")
         return None if u is None else int(round(u))
 
-    return _util("five_hour"), _util("seven_day")
+    return _used("primary"), _used("secondary"), _used("tertiary")
 
 
-def _heartbeat_line(five, week) -> bytes:
+def _heartbeat_line(five, week, sonnet) -> bytes:
     hb = {}
     if five is not None:
         hb["five_h_util"] = five
     if week is not None:
         hb["week_util"] = week
+    if sonnet is not None:
+        hb["sonnet_util"] = sonnet
     return (json.dumps(hb) + "\n").encode("utf-8")
 
 
@@ -154,11 +132,11 @@ async def _run(address, name_prefix, interval, once):
         print("connected; pushing quota every %ds (Ctrl-C to stop)" % interval)
         while True:
             try:
-                five, week = fetch_utilization()
+                five, week, sonnet = fetch_utilization()
                 await client.write_gatt_char(
-                    NUS_RX_UUID, _heartbeat_line(five, week), response=False
+                    NUS_RX_UUID, _heartbeat_line(five, week, sonnet), response=False
                 )
-                print("pushed five_h_util=%s week_util=%s" % (five, week))
+                print("pushed five_h_util=%s week_util=%s sonnet_util=%s" % (five, week, sonnet))
             except Exception as e:  # keep the link up across transient errors
                 print("push error: %s" % e)
             if once:
@@ -184,12 +162,14 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.dry_run:
-        five, week = fetch_utilization()
-        print("five_h_util=%s  week_util=%s  ->  5h remaining=%s%%  week remaining=%s%%" % (
-            five, week,
-            "--" if five is None else 100 - five,
-            "--" if week is None else 100 - week,
-        ))
+        five, week, sonnet = fetch_utilization()
+
+        def rem(u):
+            return "--" if u is None else 100 - u
+
+        print("five_h_util=%s week_util=%s sonnet_util=%s  ->  "
+              "5h remaining=%s%%  week remaining=%s%%  sonnet remaining=%s%%" % (
+                  five, week, sonnet, rem(five), rem(week), rem(sonnet)))
         return 0
 
     try:

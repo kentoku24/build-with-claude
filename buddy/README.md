@@ -23,7 +23,7 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 ## Quota bars (BLE companion)
 
-The "5h remaining" / "Week remaining" bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach the usage API itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it polls the usage API (reusing Claude Code's Keychain token, like the `quota-check` skill) and writes `five_h_util` / `week_util` heartbeats to the device, which renders `100 − utilization`.
+The **5h / Week / Sonnet** bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `sonnet_util` heartbeats to the device, which renders `100 − utilization` for each.
 
 ### Show quota on the device — runbook
 
@@ -31,13 +31,15 @@ The "5h remaining" / "Week remaining" bars show the real account quota. Claude.a
 
 ```bash
 pip install bleak          # BLE central library
+# codexbar must be on PATH and authenticated:
+codexbar --provider anthropic --format json   # should print usage JSON
 ```
 
-You must be logged into Claude Code (the companion reads its `Claude Code-credentials` Keychain entry). Preview the numbers any time without a device or Bluetooth:
+Preview the numbers any time without a device or Bluetooth:
 
 ```bash
 python3 buddy/scripts/quota_push.py --dry-run
-# five_h_util=30 week_util=6 -> 5h remaining=70% week remaining=94%
+# five_h_util=31 week_util=6 sonnet_util=4 -> 5h remaining=69% week remaining=94% sonnet remaining=96%
 ```
 
 **Each time you want the bars live**
