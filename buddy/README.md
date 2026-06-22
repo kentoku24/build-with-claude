@@ -21,6 +21,20 @@ MicroPython app bundle for the M5Stack Cardputer-Adv. Installed onto `/flash/` b
 
 Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Stats (approvals / denials / level) persist across reboots via NVS under the `buddy` namespace.
 
+## Quota bars (BLE companion)
+
+The "5h remaining" / "Week remaining" bars show the real account quota. Claude.app's heartbeat doesn't carry quota (and the device can't reach the usage API itself), so a host companion supplies it:
+
+```bash
+pip install bleak
+python3 scripts/quota_push.py            # scan for the buddy, push real quota every 60s
+python3 scripts/quota_push.py --dry-run  # print the current quota without BLE
+```
+
+`quota_push.py` polls the usage API (reusing the Keychain token, like the `quota-check` skill) and writes `five_h_util` / `week_util` heartbeats to the device. It connects as the BLE central **in place of** Claude.app — one central at a time, so run it for a live quota readout and quit it to use Claude.app's prompt-approval. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
+
+> Run it from **Terminal.app**, not from inside another app's shell — macOS Bluetooth permission is per-binary, so an indirectly-launched Python aborts with SIGABRT (exit 134) when it lacks its own Bluetooth grant. `--dry-run` does no BLE and is exempt.
+
 ## Iterating on device code
 
 `scripts/` has dev tooling for editing device sources without re-running the full onboard flow:

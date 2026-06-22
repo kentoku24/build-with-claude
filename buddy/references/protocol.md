@@ -68,10 +68,8 @@ A message **without** a `cmd` field is a heartbeat. Recognized fields:
   "waiting": N,        # awaiting permission
   "msg": "string",     # flavor text
   "entries": N,        # history entries
-  "tokens": N,         # this turn
-  "tokens_today": N,   # today total
-  "five_h_util": N,    # 5-hour quota utilization %, 0..100 (used)
-  "week_util": N,      # 7-day quota utilization %, 0..100 (used)
+  "tokens": N,         # cumulative tokens (session-scoped; see note)
+  "tokens_today": N,   # cumulative tokens today
   "prompt": {          # optional; present when waiting > 0
     "id": "...",
     "tool": "Bash",
@@ -83,24 +81,44 @@ A message **without** a `cmd` field is a heartbeat. Recognized fields:
 Heartbeats arrive ~every 10 s while connected. No response is expected;
 the device updates its UI silently.
 
-### Quota utilization fields
+This is the **complete** field set — confirmed by a live capture from
+Claude.app's Hardware Buddy (Cardputer-Adv):
 
-`five_h_util` / `week_util` drive the on-device "5h remaining" /
-"Week remaining" bars. They are **utilization** percentages (0..100,
-i.e. *used*), which the host copies straight from the Claude usage API
-(`api.anthropic.com/api/oauth/usage` → `five_hour.utilization` /
-`seven_day.utilization`). The device renders *remaining* = `100 - util`.
+```
+keys: ['entries', 'msg', 'running', 'tokens', 'tokens_today', 'total', 'waiting']
+```
 
-The device is BLE-only — it disables WiFi for radio coexistence (see
-`claude_buddy.py`) and therefore **cannot query the usage API itself**;
-these fields are the only way it learns the real quota. Floats are
-accepted (the API returns e.g. `81.0`). When a field is absent — older
-host, or the host hasn't fetched a figure yet — the device shows a `--`
-no-data bar rather than a fabricated number.
+> A note on `tokens`: protocol.md historically called it "this turn",
+> but the live capture showed `tokens` (134704) > `tokens_today` (45665),
+> so it is **not** per-turn — it's a larger cumulative counter (session
+> or rolling). Treat its exact window as unspecified.
 
-> Do **not** try to derive these from `tokens` / `tokens_today`:
-> `tokens` is per-turn and `tokens_today` is a daily total, neither of
-> which tracks the 5-hour-window or weekly quota the API reports.
+### Quota fields (from the BLE companion, not Claude.app)
+
+Claude.app's heartbeat contains **no** quota/utilization/limit/reset
+field, and the device is BLE-only so it can't query the usage API
+itself. The on-device "5h remaining" / "Week remaining" bars are instead
+fed by a host companion, `scripts/quota_push.py`, which polls the usage
+API and writes extra heartbeat fields:
+
+```
+{
+  "five_h_util": N,   # five_hour.utilization, 0..100 (used)
+  "week_util": N      # seven_day.utilization, 0..100 (used)
+}
+```
+
+The device renders *remaining* = `100 - util`, and shows `--` for any
+field it hasn't received (e.g. while connected to Claude.app, which sends
+neither). These two names are included in the device's heartbeat-detection
+set (`_HEARTBEAT_FIELDS` in `buddy_protocol.py`) so a quota-only message
+with none of the Claude.app fields is still recognized as a heartbeat.
+
+**Connection model:** the companion is the BLE central, like Claude.app,
+and a buddy accepts one central at a time — so the companion and
+Claude.app are mutually exclusive. Connect the companion for a live quota
+readout; quit it and reconnect from Claude.app for prompt-approval.
+Simultaneous use would require multi-connection support in the firmware.
 
 ## Outbound (device → host)
 

@@ -53,10 +53,9 @@ to size 4 for cross-room readability.
   Connected with heartbeat:
     y=0..20    header
     y=26       identity band (name + owner)
-    y=42       queue line  ("Q: Nrun Nwait Ntot")
-    y=58       tokens line ("Today: N,NNN tok")
-    y=74       status msg (if hb["msg"] is set)
-    y=90..108  prompt box (when a permission is pending)
+    y=40       "5h remaining" quota bar (100 - five_h_util)
+    y=64       "Week remaining" quota bar (hidden while a prompt is up)
+    y=74..108  prompt box (when a permission is pending)
     y=112..134 hint strip (Y once / N deny / Q exit columns)
 
   Passkey overlay (during BLE pairing, layered over main):
