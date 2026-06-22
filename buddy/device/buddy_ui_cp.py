@@ -53,8 +53,8 @@ to size 4 for cross-room readability.
   Connected with heartbeat:
     y=0..20    header
     y=26       identity band (name + owner)
-    y=40       "5h pace" burn-rate bar (label + Nx + bar)
-    y=64       "Wk pace" burn-rate bar (hidden while a prompt is up)
+    y=40       "5h remaining" quota bar (100 - five_h_util)
+    y=64       "Week remaining" quota bar (hidden while a prompt is up)
     y=74..108  prompt box (when a permission is pending)
     y=112..134 hint strip (Y once / N deny / Q exit columns)
 
@@ -65,7 +65,6 @@ to size 4 for cross-room readability.
 """
 
 import M5
-import time
 
 # Anthropic palette, inlined — byte-for-byte matches ui_theme.py.
 ORANGE = 0xCC785C
@@ -85,34 +84,18 @@ _LCD = M5.Lcd
 _W = 240
 _H = 135
 
-# --- Burn-rate "quota pace" gauges -------------------------------------
-# Claude.app's Hardware Buddy heartbeat carries NO quota/utilization — a
-# live capture showed only: total, running, waiting, msg, entries,
-# tokens, tokens_today (see buddy/references/protocol.md). So the device
-# CANNOT show a faithful "5h/week remaining" %; any such number would be
-# fabricated (that was the original "尺が合ってない" bug).
+# Usage bars render the *real* Claude quota, which only the host knows.
+# The device is BLE-only (claude_buddy.py takes WiFi down for radio
+# coexistence) so it can't query the usage API itself — the host sends
+# the figures in each heartbeat as `five_h_util` / `week_util`:
+# utilization percentages (0..100, "used") copied straight from
+# api.anthropic.com/api/oauth/usage (five_hour.utilization /
+# seven_day.utilization). We draw *remaining* = 100 - utilization.
 #
-# What it CAN measure is the token *burn rate*: the average tokens/min
-# since the current connection, (tokens_today_now - tokens_today_at_connect)
-# / minutes_connected. We use a cumulative average, NOT an instantaneous
-# EMA: Claude emits tokens in bursts (a big batch on each response, then
-# flat for several 10 s heartbeats), so an EMA of per-tick deltas decays
-# through the flat ticks and reads ~0. The cumulative average tracks true
-# throughput and is also the right quantity for "am I on pace" — it's
-# exactly what projects to total window usage.
-#
-# We render the ratio of that rate to a *sustainable* rate (one window's
-# budget spread over the window) as "pace": 1.0x == on track to spend the
-# whole window; >1x == headed for the cap before it resets.
-#
-# NOTE: the budgets below cannot be derived from real quota — Claude.app
-# sends no utilization, and the account quota is reported only as a % (not
-# tokens) and is account-wide, so there's no clean tokens<->quota mapping.
-# They are tunable "feel" thresholds: lower budget -> higher pace reading.
-_BUDGET_5H_TOKENS = 450_000        # ~sustained active coding reads ~1.0x
-_BUDGET_WEEK_TOKENS = 20_000_000   # tokens budget per 7-day window
-_WINDOW_5H_MIN = 5 * 60
-_WINDOW_WEEK_MIN = 7 * 24 * 60
+# These replace the old token-count estimate (hb["tokens"] vs a guessed
+# 1M/7M ceiling), which had no relationship to the real quota — see
+# buddy/references/protocol.md, where `tokens` is "this turn" and
+# `tokens_today` is "today total", neither a 5h-window nor weekly figure.
 
 
 def _has_cjk(s: str) -> bool:
@@ -163,13 +146,6 @@ class BuddyUI:
         # the footer after _draw_main's fillRect wipes y=96..110.
         self._last_stats = {}
         self._last_battery = {}
-        # Burn-rate tracking for the pace gauges. _rate_tpm is the
-        # cumulative-average token/min rate since this connection (None
-        # until enough time has elapsed for a stable figure). _base_tok /
-        # _base_ms anchor the average at the first heartbeat after connect.
-        self._rate_tpm = None
-        self._base_tok = None
-        self._base_ms = None
         _LCD.fillScreen(BLACK)
         # setFont is sticky across setTextSize calls, so we pick
         # DejaVu9 once at init. Wrapped in try/except so a future
@@ -192,12 +168,6 @@ class BuddyUI:
         if state in ("advertising", "disconnected"):
             self._prompt = None
             self._last = {}
-            # Drop burn-rate history so a reconnect re-anchors the average
-            # instead of spanning the disconnected gap (idle minutes during
-            # which tokens_today may have moved on another machine).
-            self._rate_tpm = None
-            self._base_tok = None
-            self._base_ms = None
         self._draw_main()
         self.restore_button_hints()
 
@@ -231,7 +201,6 @@ class BuddyUI:
         self.restore_button_hints()
 
     def update_heartbeat(self, hb: dict):
-        self._update_rate(hb)
         prev_pending = bool(self._prompt)
         self._last = hb
         self._prompt = hb.get("prompt")
@@ -427,107 +396,73 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _update_rate(self, hb):
-        """Update the cumulative-average burn rate from tokens_today.
+    def _draw_bar(self, label: str, pct, y: int):
+        """Draw a labeled horizontal progress bar showing remaining quota.
 
-        rate = (tokens_today - baseline) / minutes since the baseline was
-        taken at connect. This averages over Claude's burst-then-flat token
-        pattern (an EMA of per-tick deltas decays through the flat 10 s
-        ticks and reads ~0). Uses the device monotonic clock (ticks_ms).
-        A drop in tokens_today (midnight rollover / new session) re-anchors
-        the baseline. Stays None until >=30 s have elapsed, so the first
-        couple of ticks don't produce a wild figure off a tiny window.
-        """
-        tok = hb.get("tokens_today")
-        if tok is None:
-            return
-        now = time.ticks_ms()
-        if self._base_tok is None:
-            # First sample after connect — anchor the average, no rate yet.
-            self._base_tok = tok
-            self._base_ms = now
-            return
-        if tok < self._base_tok:
-            # Counter reset beneath us (midnight rollover / new session) —
-            # re-anchor and show 0 rather than a negative spike.
-            self._base_tok = tok
-            self._base_ms = now
-            self._rate_tpm = 0.0
-            return
-        dt_ms = time.ticks_diff(now, self._base_ms)
-        if dt_ms >= 30000:
-            self._rate_tpm = (tok - self._base_tok) * 60000.0 / dt_ms
-        # TEMP CALIBRATION — pair the measured burn rate with quota-check's
-        # 5h/week % to sanity-check _BUDGET_*_TOKENS. Remove before merge.
-        print("PACE-DBG tokens_today=", tok, "rate_tpm=", self._rate_tpm)
+        pct is the *remaining* percentage (0..100); pct=100 means the bar is
+        full. pct=None means "no data yet" (the host hasn't sent a real quota
+        figure) — we draw an empty bar and a "--" label rather than inventing
+        a number.
 
-    def _pace(self):
-        """Return (h5_pace, wk_pace) as float multiples of the sustainable
-        rate, or (None, None) until a rate is known. pace 1.0 == burning
-        exactly fast enough to spend one window's budget over the window."""
-        r = self._rate_tpm
-        if r is None:
-            return None, None
-        sus_5h = _BUDGET_5H_TOKENS / _WINDOW_5H_MIN
-        sus_wk = _BUDGET_WEEK_TOKENS / _WINDOW_WEEK_MIN
-        h5 = r / sus_5h if sus_5h > 0 else None
-        wk = r / sus_wk if sus_wk > 0 else None
-        return h5, wk
-
-    def _pace_view(self, pace):
-        """Map a pace multiple to (fill 0..100, label, color).
-
-        Bar fills as you burn hotter: 1.0x sits mid-bar, 2.0x fills it.
-        Green under sustainable, yellow approaching, red over — so a full
-        red bar means "at this rate you'll exhaust the window early".
-        None (no rate yet) → empty bar + "--".
-        """
-        if pace is None:
-            return 0, "--", GRAY_DIM
-        fill = int(pace * 50)
-        # One decimal without relying on float format specs (some
-        # MicroPython builds omit them): 1.37 -> "1.4x".
-        tenths = int(pace * 10 + 0.5)
-        label = "{}.{}x".format(tenths // 10, tenths % 10)
-        color = GREEN if pace < 1.0 else (YELLOW if pace < 1.5 else RED)
-        return fill, label, color
-
-    def _draw_bar(self, label: str, fill, y: int, value_str: str, color: int):
-        """Draw a labeled horizontal bar. fill is 0..100 (clamped); value_str
-        is the right-aligned readout; color is the fill color.
-
-        Draws the filled and empty portions in a single pass (no intermediate
-        full-gray state) to avoid flicker on in-place updates. The right-hand
-        readout slot is cleared to a fixed width first so a shorter string
-        ("--") always overwrites a longer one ("2.3x").
+        Draws the filled and empty portions of the bar in a single pass (no
+        intermediate full-gray state) to avoid visible flicker on in-place
+        updates.  The percentage text area is always cleared to a fixed width
+        before writing so variable-width strings ("9%" vs "100%") don't leave
+        stale pixels from a previous wider value.
         """
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
         _LCD.drawString(label, 6, y)
+        # Clear a 36 px slot at the right edge for the pct label so that
+        # a shorter string ("9%" / "--") always overwrites a longer one ("100%").
         _LCD.fillRect(_W - 38, y, 32, 10, BLACK)
+        if pct is None:
+            pct_str = "--"
+            fill_pct = 0
+        else:
+            fill_pct = max(0, min(100, pct))
+            pct_str = "{}%".format(fill_pct)
         _LCD.setTextColor(WHITE, BLACK)
-        _LCD.drawString(value_str, _right(y, 6, value_str), y)
+        _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
         bar_y = y + 13
         bar_w = _W - 12
-        fill = max(0, min(100, fill))
-        fill_w = int(bar_w * fill // 100)
+        fill_w = int(bar_w * fill_pct // 100)
+        color = GREEN if fill_pct > 50 else (YELLOW if fill_pct > 20 else RED)
+        # Draw filled portion then empty portion in one pass — never shows
+        # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
             _LCD.fillRect(6, bar_y, fill_w, 8, color)
         if fill_w < bar_w:
             _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
 
-    def _draw_data_rows(self):
-        """Update the pace bars in-place without clearing the full content
-        area, so the screen never goes black between ticks.
+    def _data_pcts(self):
+        """Return (h5_remaining, wk_remaining) as 0..100, or None when unknown.
+
+        `five_h_util` / `week_util` are utilization percentages (0..100,
+        "used") the host copies from the usage API; we display *remaining*,
+        i.e. 100 - utilization. A field that's absent (host hasn't sent a
+        real figure yet, or runs an older build) yields None — the bar then
+        renders a "--" no-data state rather than a fabricated number.
         """
-        h5_pace, wk_pace = self._pace()
-        fill, val, color = self._pace_view(h5_pace)
-        self._draw_bar("5h pace", fill, 40, val, color)
+        hb = self._last
+        h5 = hb.get("five_h_util")
+        wk = hb.get("week_util")
+        h5_pct = None if h5 is None else max(0, min(100, 100 - int(h5)))
+        wk_pct = None if wk is None else max(0, min(100, 100 - int(wk)))
+        return h5_pct, wk_pct
+
+    def _draw_data_rows(self):
+        """Update usage bars in-place without clearing the full content area.
+
+        Called on every steady-state heartbeat instead of _draw_main so the
+        screen never goes black between ticks.
+        """
+        h5_pct, wk_pct = self._data_pcts()
+        self._draw_bar("5h remaining", h5_pct, 40)
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            fill, val, color = self._pace_view(wk_pace)
-            self._draw_bar("Wk pace", fill, 64, val, color)
+            self._draw_bar("Week remaining", wk_pct, 64)
 
     def _draw_connected_main(self):
         self._draw_identity()

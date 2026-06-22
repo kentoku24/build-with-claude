@@ -93,20 +93,32 @@ keys: ['entries', 'msg', 'running', 'tokens', 'tokens_today', 'total', 'waiting'
 > so it is **not** per-turn — it's a larger cumulative counter (session
 > or rolling). Treat its exact window as unspecified.
 
-### No quota / utilization is available
+### Quota fields (from the BLE companion, not Claude.app)
 
-There is **no** quota, utilization, limit, or reset-time field in the
-heartbeat. The device is BLE-only (it disables WiFi for radio
-coexistence — see `claude_buddy.py`) so it also cannot query the usage
-API itself. Therefore the device **cannot show a faithful "5h/week
-remaining" %** — any such number would be fabricated.
+Claude.app's heartbeat contains **no** quota/utilization/limit/reset
+field, and the device is BLE-only so it can't query the usage API
+itself. The on-device "5h remaining" / "Week remaining" bars are instead
+fed by a host companion, `scripts/quota_push.py`, which polls the usage
+API and writes extra heartbeat fields:
 
-What it *can* do is measure the **burn rate** (Δ`tokens_today` / Δt) and
-render it as a "pace" relative to a calibrated per-window token budget
-(`_BUDGET_5H_TOKENS` / `_BUDGET_WEEK_TOKENS` in `buddy_ui_cp.py`). That
-answers "at this rate, am I on track to blow the limit before it resets?"
-— directional, not a true level. To see real quota %, use the
-`quota-check` skill on the host (it calls the usage API directly).
+```
+{
+  "five_h_util": N,   # five_hour.utilization, 0..100 (used)
+  "week_util": N      # seven_day.utilization, 0..100 (used)
+}
+```
+
+The device renders *remaining* = `100 - util`, and shows `--` for any
+field it hasn't received (e.g. while connected to Claude.app, which sends
+neither). These two names are included in the device's heartbeat-detection
+set (`_HEARTBEAT_FIELDS` in `buddy_protocol.py`) so a quota-only message
+with none of the Claude.app fields is still recognized as a heartbeat.
+
+**Connection model:** the companion is the BLE central, like Claude.app,
+and a buddy accepts one central at a time — so the companion and
+Claude.app are mutually exclusive. Connect the companion for a live quota
+readout; quit it and reconnect from Claude.app for prompt-approval.
+Simultaneous use would require multi-connection support in the firmware.
 
 ## Outbound (device → host)
 
