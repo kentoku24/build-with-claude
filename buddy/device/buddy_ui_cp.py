@@ -85,6 +85,19 @@ _LCD = M5.Lcd
 _W = 240
 _H = 135
 
+# Usage bars render the *real* Claude quota, which only the host knows.
+# The device is BLE-only (claude_buddy.py takes WiFi down for radio
+# coexistence) so it can't query the usage API itself — the host sends
+# the figures in each heartbeat as `five_h_util` / `week_util`:
+# utilization percentages (0..100, "used") copied straight from
+# api.anthropic.com/api/oauth/usage (five_hour.utilization /
+# seven_day.utilization). We draw *remaining* = 100 - utilization.
+#
+# These replace the old token-count estimate (hb["tokens"] vs a guessed
+# 1M/7M ceiling), which had no relationship to the real quota — see
+# buddy/references/protocol.md, where `tokens` is "this turn" and
+# `tokens_today` is "today total", neither a 5h-window nor weekly figure.
+
 
 def _has_cjk(s: str) -> bool:
     """True if s contains any character outside the DejaVu9 Latin range."""
@@ -192,10 +205,22 @@ class BuddyUI:
         prev_pending = bool(self._prompt)
         self._last = hb
         self._prompt = hb.get("prompt")
-        self._draw_main()
-        # Hint strip content depends on prompt-pending state; repaint
-        # when it flips so the Y/N keys surface only when useful.
-        if bool(self._prompt) != prev_pending:
+        curr_pending = bool(self._prompt)
+        # Steady-state connected heartbeat: skip the full clear+redraw in
+        # _draw_main and just update the bar rows in-place.  This eliminates
+        # the black flash that _draw_main's fillRect causes on every tick.
+        # Fall through to _draw_main only on transitions (prompt appear/
+        # disappear) or non-connected states, where a full repaint is needed.
+        if (
+            self._connection_state not in ("advertising", "disconnected")
+            and self._passkey is None
+            and not self._unpair_prompt
+            and curr_pending == prev_pending
+        ):
+            self._draw_data_rows()
+        else:
+            self._draw_main()
+        if curr_pending != prev_pending:
             self.restore_button_hints()
 
     def update_identity(self, name: str, owner: str):
@@ -372,46 +397,80 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _draw_connected_main(self):
-        self._draw_identity()
-        hb = self._last
+    def _draw_bar(self, label: str, pct, y: int):
+        """Draw a labeled horizontal progress bar showing remaining quota.
+
+        pct is the *remaining* percentage (0..100); pct=100 means the bar is
+        full. pct=None means "no data yet" (the host hasn't sent a real quota
+        figure) — we draw an empty bar and a "--" label rather than inventing
+        a number.
+
+        Draws the filled and empty portions of the bar in a single pass (no
+        intermediate full-gray state) to avoid visible flicker on in-place
+        updates.  The percentage text area is always cleared to a fixed width
+        before writing so variable-width strings ("9%" vs "100%") don't leave
+        stale pixels from a previous wider value.
+        """
         _LCD.setTextSize(1)
-        running = hb.get("running", 0)
-        waiting = hb.get("waiting", 0)
-        total = hb.get("total", 0)
+        _LCD.setTextColor(GRAY_MID, BLACK)
+        _LCD.drawString(label, 6, y)
+        # Clear a 36 px slot at the right edge for the pct label so that
+        # a shorter string ("9%" / "--") always overwrites a longer one ("100%").
+        _LCD.fillRect(_W - 38, y, 32, 10, BLACK)
+        if pct is None:
+            pct_str = "--"
+            fill_pct = 0
+        else:
+            fill_pct = max(0, min(100, pct))
+            pct_str = "{}%".format(fill_pct)
         _LCD.setTextColor(WHITE, BLACK)
-        queue = "Q: {}run {}wait {}tot".format(running, waiting, total)
-        # Clip to screen width so large numbers don't wrap.
-        while _LCD.textWidth(queue) > _W - 12 and len(queue) > 1:
-            queue = queue[:-1]
-        _LCD.drawString(queue, 6, 42)
-        tokens_today = hb.get("tokens_today", 0)
-        _LCD.setTextColor(CYAN, BLACK)
-        tok = "{:,}".format(tokens_today).replace(",", "'")
-        tok_line = "Today: " + tok + " tok"
-        while _LCD.textWidth(tok_line) > _W - 12 and len(tok_line) > 1:
-            tok_line = tok_line[:-1]
-        _LCD.drawString(tok_line, 6, 58)
-        # When a prompt is active the prompt box takes over the lower
-        # third of the panel — skip the generic msg line so they don't
-        # overlap. When no prompt is pending, msg fills the same row.
+        _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
+        bar_y = y + 13
+        bar_w = _W - 12
+        fill_w = int(bar_w * fill_pct // 100)
+        color = GREEN if fill_pct > 50 else (YELLOW if fill_pct > 20 else RED)
+        # Draw filled portion then empty portion in one pass — never shows
+        # an intermediate all-gray state, so the bar updates without flash.
+        if fill_w > 0:
+            _LCD.fillRect(6, bar_y, fill_w, 8, color)
+        if fill_w < bar_w:
+            _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
+
+    def _data_pcts(self):
+        """Return (h5_remaining, wk_remaining) as 0..100, or None when unknown.
+
+        `five_h_util` / `week_util` are utilization percentages (0..100,
+        "used") the host copies from the usage API; we display *remaining*,
+        i.e. 100 - utilization. A field that's absent (host hasn't sent a
+        real figure yet, or runs an older build) yields None — the bar then
+        renders a "--" no-data state rather than a fabricated number.
+        """
+        hb = self._last
+        h5 = hb.get("five_h_util")
+        wk = hb.get("week_util")
+        h5_pct = None if h5 is None else max(0, min(100, 100 - int(h5)))
+        wk_pct = None if wk is None else max(0, min(100, 100 - int(wk)))
+        return h5_pct, wk_pct
+
+    def _draw_data_rows(self):
+        """Update usage bars in-place without clearing the full content area.
+
+        Called on every steady-state heartbeat instead of _draw_main so the
+        screen never goes black between ticks.
+        """
+        h5_pct, wk_pct = self._data_pcts()
+        self._draw_bar("5h remaining", h5_pct, 40)
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            msg = hb.get("msg", "")
-            if msg:
-                h = _set_font_auto(msg)
-                _LCD.setTextColor(GRAY_MID, BLACK)
-                while _LCD.textWidth(msg) > _W - 12 and len(msg) > 1:
-                    msg = msg[:-1]
-                _LCD.drawString(msg, 6, 74)
-                if h > 10:
-                    _LCD.setFont(_LCD.FONTS.DejaVu9)
-        # After an overlay (passkey/unpair) exits back to connected,
-        # _draw_main used the full-clear fillRect which wiped the footer.
-        # Restore it now — but only when no prompt is active, because
-        # the prompt box (y=74..108) overlaps the footer band (y=96..110)
-        # and drawing footer text inside the box would corrupt it visually.
+            self._draw_bar("Week remaining", wk_pct, 64)
+
+    def _draw_connected_main(self):
+        self._draw_identity()
+        self._draw_data_rows()
+        # After an overlay exits back to connected, _draw_main's full-clear
+        # fillRect wiped the footer — restore it, but not while a prompt box
+        # (y=74..108) overlaps the footer band (y=96..110).
         if not self._prompt and (self._last_stats or self._last_battery):
             self._draw_footer(self._last_stats, self._last_battery)
 
