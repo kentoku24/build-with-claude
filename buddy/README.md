@@ -23,17 +23,39 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 ## Quota bars (BLE companion)
 
-The "5h remaining" / "Week remaining" bars show the real account quota. Claude.app's heartbeat doesn't carry quota (and the device can't reach the usage API itself), so a host companion supplies it:
+The **5h / Week / Sonnet** bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `sonnet_util` heartbeats to the device, which renders `100 − utilization` for each.
+
+### Show quota on the device — runbook
+
+**One-time setup**
 
 ```bash
-pip install bleak
-python3 scripts/quota_push.py            # scan for the buddy, push real quota every 60s
-python3 scripts/quota_push.py --dry-run  # print the current quota without BLE
+pip install bleak          # BLE central library
+# codexbar must be on PATH and authenticated:
+codexbar --provider anthropic --format json   # should print usage JSON
 ```
 
-`quota_push.py` polls the usage API (reusing the Keychain token, like the `quota-check` skill) and writes `five_h_util` / `week_util` heartbeats to the device. It connects as the BLE central **in place of** Claude.app — one central at a time, so run it for a live quota readout and quit it to use Claude.app's prompt-approval. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
+Preview the numbers any time without a device or Bluetooth:
 
-> Run it from **Terminal.app**, not from inside another app's shell — macOS Bluetooth permission is per-binary, so an indirectly-launched Python aborts with SIGABRT (exit 134) when it lacks its own Bluetooth grant. `--dry-run` does no BLE and is exempt.
+```bash
+python3 buddy/scripts/quota_push.py --dry-run
+# five_h_util=31 week_util=6 sonnet_util=4 -> 5h remaining=69% week remaining=94% sonnet remaining=96%
+```
+
+**Each time you want the bars live**
+
+1. **On the device** — open the **Claude Buddy** app from the launcher so it advertises. If Claude.app is connected to it, disconnect first (Claude → Developer → Hardware Buddy → Disconnect): the device accepts **one BLE central at a time**.
+2. **On this Mac — from Terminal.app** (see the Bluetooth note below), run:
+   ```bash
+   cd <repo>/buddy
+   python3 scripts/quota_push.py            # connect, push real quota every 60s
+   ```
+   The bars fill with the real percentages and refresh each cycle. Leave it running; `Ctrl-C` to stop. (`--once` pushes a single sample and exits — handy for a quick check.)
+3. **To go back to prompt-approval**, `Ctrl-C` the companion and reconnect from Claude.app. The bars revert to `--` (Claude.app sends no quota) — expected. Claude.app and the companion can't be connected at the same time.
+
+> **Must run from Terminal.app.** macOS grants Bluetooth permission **per binary**. Launching the companion from inside another app's shell (e.g. an editor/agent terminal) inherits that app's Bluetooth context, and CoreBluetooth aborts the process with **SIGABRT (exit 134)**. `--dry-run` does no BLE and is exempt. First run from Terminal.app will prompt for Bluetooth permission — allow it.
+
+See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the wire details.
 
 ## Iterating on device code
 

@@ -15,7 +15,8 @@ Host → device messages (what we receive):
         "msg":"...", "entries":N, "tokens":N, "tokens_today":N,
         "prompt":{"id":"...","tool":"...","hint":"..."}}
     quota heartbeat from the BLE companion (scripts/quota_push.py):
-        {"five_h_util":N, "week_util":N}  - real usage-API utilization %
+        {"five_h_util":N, "week_util":N, "sonnet_util":N}  - utilization %
+        (5-hour / 7-day-all / 7-day-Sonnet) from codexbar
 
 Device → host messages (what we emit):
     {"ack":"status","name":..,"sec":true,"bat":{...},"sys":{...},"stats":{...}}
@@ -38,10 +39,11 @@ FIRMWARE_VERSION = "m5buddy-0.1"
 _HEARTBEAT_FIELDS = (
     "total", "running", "waiting", "tokens", "tokens_today", "entries",
     # Quota fields from the BLE companion (scripts/quota_push.py). Listed
-    # here so a quota-only heartbeat — {"five_h_util":N,"week_util":N} with
-    # none of the Claude.app fields — is still recognized as a heartbeat
-    # and reaches the UI, instead of falling through to "unclassified".
-    "five_h_util", "week_util",
+    # here so a quota-only heartbeat — e.g. {"five_h_util":N,"week_util":N,
+    # "sonnet_util":N} with none of the Claude.app fields — is still
+    # recognized as a heartbeat and reaches the UI, instead of falling
+    # through to "unclassified".
+    "five_h_util", "week_util", "sonnet_util",
 )
 
 # Unpair is destructive (wipes name/owner/stats and disconnects). The

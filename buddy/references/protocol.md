@@ -96,23 +96,27 @@ keys: ['entries', 'msg', 'running', 'tokens', 'tokens_today', 'total', 'waiting'
 ### Quota fields (from the BLE companion, not Claude.app)
 
 Claude.app's heartbeat contains **no** quota/utilization/limit/reset
-field, and the device is BLE-only so it can't query the usage API
-itself. The on-device "5h remaining" / "Week remaining" bars are instead
-fed by a host companion, `scripts/quota_push.py`, which polls the usage
-API and writes extra heartbeat fields:
+field, and the device is BLE-only so it can't query usage itself. The
+on-device "5h / Week / Sonnet" bars are instead fed by a host companion,
+`scripts/quota_push.py` (backed by `codexbar --provider anthropic
+--format json`), which writes extra heartbeat fields:
 
 ```
 {
-  "five_h_util": N,   # five_hour.utilization, 0..100 (used)
-  "week_util": N      # seven_day.utilization, 0..100 (used)
+  "five_h_util": N,   # codexbar usage.primary.usedPercent   (5-hour)
+  "week_util": N,     # codexbar usage.secondary.usedPercent (7-day, all)
+  "sonnet_util": N    # codexbar usage.tertiary.usedPercent  (7-day, Sonnet)
 }
 ```
 
-The device renders *remaining* = `100 - util`, and shows `--` for any
-field it hasn't received (e.g. while connected to Claude.app, which sends
-neither). These two names are included in the device's heartbeat-detection
-set (`_HEARTBEAT_FIELDS` in `buddy_protocol.py`) so a quota-only message
-with none of the Claude.app fields is still recognized as a heartbeat.
+All three are utilization percentages (0..100, "used"). The codexbar
+mapping was verified against the labeled usage API: `primary`==`five_hour`,
+`secondary`==`seven_day`, `tertiary`==`seven_day_sonnet`. The device
+renders *remaining* = `100 - util` for each, and shows `--` for any field
+it hasn't received (e.g. on the Claude.app link, which sends none). These
+names are in the device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
+`buddy_protocol.py`) so a quota-only message with none of the Claude.app
+fields is still recognized as a heartbeat.
 
 **Connection model:** the companion is the BLE central, like Claude.app,
 and a buddy accepts one central at a time — so the companion and
