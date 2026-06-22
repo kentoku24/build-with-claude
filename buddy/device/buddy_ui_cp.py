@@ -92,22 +92,27 @@ _H = 135
 # CANNOT show a faithful "5h/week remaining" %; any such number would be
 # fabricated (that was the original "尺が合ってない" bug).
 #
-# What it CAN measure exactly is the token *burn rate*
-# (Δtokens_today / Δt). We compare that to a *sustainable* rate for each
-# window — the rate that would spend exactly one window's budget over the
-# window's length — and render the ratio ("pace"). pace 1.0x means
-# "burning exactly fast enough to use the whole window"; >1x means you're
-# on track to hit the limit before it resets. Directional, not a level.
+# What it CAN measure is the token *burn rate*: the average tokens/min
+# since the current connection, (tokens_today_now - tokens_today_at_connect)
+# / minutes_connected. We use a cumulative average, NOT an instantaneous
+# EMA: Claude emits tokens in bursts (a big batch on each response, then
+# flat for several 10 s heartbeats), so an EMA of per-tick deltas decays
+# through the flat ticks and reads ~0. The cumulative average tracks true
+# throughput and is also the right quantity for "am I on pace" — it's
+# exactly what projects to total window usage.
 #
-# Calibrate these to YOUR plan so 1.0x lines up with reality: run the
-# `quota-check` skill, watch how its 5h/week % climbs over ~30 min, and
-# tune the budgets until the bars feel right. Lower budget -> higher pace.
-_BUDGET_5H_TOKENS = 1_000_000      # tokens you can spend per 5-hour window
-_BUDGET_WEEK_TOKENS = 20_000_000   # tokens you can spend per 7-day window
+# We render the ratio of that rate to a *sustainable* rate (one window's
+# budget spread over the window) as "pace": 1.0x == on track to spend the
+# whole window; >1x == headed for the cap before it resets.
+#
+# NOTE: the budgets below cannot be derived from real quota — Claude.app
+# sends no utilization, and the account quota is reported only as a % (not
+# tokens) and is account-wide, so there's no clean tokens<->quota mapping.
+# They are tunable "feel" thresholds: lower budget -> higher pace reading.
+_BUDGET_5H_TOKENS = 450_000        # ~sustained active coding reads ~1.0x
+_BUDGET_WEEK_TOKENS = 20_000_000   # tokens budget per 7-day window
 _WINDOW_5H_MIN = 5 * 60
 _WINDOW_WEEK_MIN = 7 * 24 * 60
-# EMA smoothing for the burn rate (0..1; higher = snappier but noisier).
-_RATE_EMA = 0.4
 
 
 def _has_cjk(s: str) -> bool:
@@ -159,12 +164,12 @@ class BuddyUI:
         self._last_stats = {}
         self._last_battery = {}
         # Burn-rate tracking for the pace gauges. _rate_tpm is the
-        # EMA-smoothed token/min rate (None until we have two samples to
-        # diff). _prev_tok/_prev_ms hold the previous heartbeat's
-        # tokens_today and the device clock at that time.
+        # cumulative-average token/min rate since this connection (None
+        # until enough time has elapsed for a stable figure). _base_tok /
+        # _base_ms anchor the average at the first heartbeat after connect.
         self._rate_tpm = None
-        self._prev_tok = None
-        self._prev_ms = None
+        self._base_tok = None
+        self._base_ms = None
         _LCD.fillScreen(BLACK)
         # setFont is sticky across setTextSize calls, so we pick
         # DejaVu9 once at init. Wrapped in try/except so a future
@@ -187,12 +192,12 @@ class BuddyUI:
         if state in ("advertising", "disconnected"):
             self._prompt = None
             self._last = {}
-            # Drop burn-rate history so a reconnect doesn't diff
-            # tokens_today across the disconnected gap (which would
-            # produce a bogus spike or a reset-looking negative delta).
+            # Drop burn-rate history so a reconnect re-anchors the average
+            # instead of spanning the disconnected gap (idle minutes during
+            # which tokens_today may have moved on another machine).
             self._rate_tpm = None
-            self._prev_tok = None
-            self._prev_ms = None
+            self._base_tok = None
+            self._base_ms = None
         self._draw_main()
         self.restore_button_hints()
 
@@ -423,36 +428,37 @@ class BuddyUI:
         _LCD.drawString("and pick this one", 6, 84)
 
     def _update_rate(self, hb):
-        """Fold this heartbeat's tokens_today into the smoothed burn rate.
+        """Update the cumulative-average burn rate from tokens_today.
 
-        Burn rate = Δtokens_today / Δt, in tokens/min, EMA-smoothed. A
-        non-increasing delta (idle tick, or the daily counter rolling over)
-        contributes 0 or is treated as a reset — we never let a counter
-        reset register as negative burn. Uses the device monotonic clock
-        (time.ticks_ms), so it's independent of any host time field.
+        rate = (tokens_today - baseline) / minutes since the baseline was
+        taken at connect. This averages over Claude's burst-then-flat token
+        pattern (an EMA of per-tick deltas decays through the flat 10 s
+        ticks and reads ~0). Uses the device monotonic clock (ticks_ms).
+        A drop in tokens_today (midnight rollover / new session) re-anchors
+        the baseline. Stays None until >=30 s have elapsed, so the first
+        couple of ticks don't produce a wild figure off a tiny window.
         """
         tok = hb.get("tokens_today")
         if tok is None:
             return
         now = time.ticks_ms()
-        if self._prev_tok is not None and self._prev_ms is not None:
-            dt_ms = time.ticks_diff(now, self._prev_ms)
-            d_tok = tok - self._prev_tok
-            if d_tok < 0:
-                # Counter reset (daily rollover / new session) — rebaseline
-                # without polluting the rate with a huge negative spike.
-                self._rate_tpm = 0.0
-            elif dt_ms >= 1000:
-                inst = d_tok * 60000.0 / dt_ms
-                if self._rate_tpm is None:
-                    self._rate_tpm = inst
-                else:
-                    self._rate_tpm = _RATE_EMA * inst + (1.0 - _RATE_EMA) * self._rate_tpm
-        self._prev_tok = tok
-        self._prev_ms = now
-        # TEMP CALIBRATION — lets us pair the device's measured burn rate
-        # with quota-check's 5h/week % to set _BUDGET_*_TOKENS. Remove once
-        # the budgets are dialed in.
+        if self._base_tok is None:
+            # First sample after connect — anchor the average, no rate yet.
+            self._base_tok = tok
+            self._base_ms = now
+            return
+        if tok < self._base_tok:
+            # Counter reset beneath us (midnight rollover / new session) —
+            # re-anchor and show 0 rather than a negative spike.
+            self._base_tok = tok
+            self._base_ms = now
+            self._rate_tpm = 0.0
+            return
+        dt_ms = time.ticks_diff(now, self._base_ms)
+        if dt_ms >= 30000:
+            self._rate_tpm = (tok - self._base_tok) * 60000.0 / dt_ms
+        # TEMP CALIBRATION — pair the measured burn rate with quota-check's
+        # 5h/week % to sanity-check _BUDGET_*_TOKENS. Remove before merge.
         print("PACE-DBG tokens_today=", tok, "rate_tpm=", self._rate_tpm)
 
     def _pace(self):
