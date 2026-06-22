@@ -70,6 +70,8 @@ A message **without** a `cmd` field is a heartbeat. Recognized fields:
   "entries": N,        # history entries
   "tokens": N,         # this turn
   "tokens_today": N,   # today total
+  "five_h_util": N,    # 5-hour quota utilization %, 0..100 (used)
+  "week_util": N,      # 7-day quota utilization %, 0..100 (used)
   "prompt": {          # optional; present when waiting > 0
     "id": "...",
     "tool": "Bash",
@@ -80,6 +82,25 @@ A message **without** a `cmd` field is a heartbeat. Recognized fields:
 
 Heartbeats arrive ~every 10 s while connected. No response is expected;
 the device updates its UI silently.
+
+### Quota utilization fields
+
+`five_h_util` / `week_util` drive the on-device "5h remaining" /
+"Week remaining" bars. They are **utilization** percentages (0..100,
+i.e. *used*), which the host copies straight from the Claude usage API
+(`api.anthropic.com/api/oauth/usage` → `five_hour.utilization` /
+`seven_day.utilization`). The device renders *remaining* = `100 - util`.
+
+The device is BLE-only — it disables WiFi for radio coexistence (see
+`claude_buddy.py`) and therefore **cannot query the usage API itself**;
+these fields are the only way it learns the real quota. Floats are
+accepted (the API returns e.g. `81.0`). When a field is absent — older
+host, or the host hasn't fetched a figure yet — the device shows a `--`
+no-data bar rather than a fabricated number.
+
+> Do **not** try to derive these from `tokens` / `tokens_today`:
+> `tokens` is per-turn and `tokens_today` is a daily total, neither of
+> which tracks the 5-hour-window or weekly quota the API reports.
 
 ## Outbound (device → host)
 

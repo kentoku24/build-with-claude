@@ -85,9 +85,18 @@ _LCD = M5.Lcd
 _W = 240
 _H = 135
 
-# Approximate token limits for usage bars.  Adjust to match your plan.
-_LIMIT_5H = 1_000_000   # tokens per 5-hour window  (maps to hb["tokens"])
-_LIMIT_WEEK = 7_000_000  # tokens per week           (maps to hb["tokens_today"] * 7)
+# Usage bars render the *real* Claude quota, which only the host knows.
+# The device is BLE-only (claude_buddy.py takes WiFi down for radio
+# coexistence) so it can't query the usage API itself — the host sends
+# the figures in each heartbeat as `five_h_util` / `week_util`:
+# utilization percentages (0..100, "used") copied straight from
+# api.anthropic.com/api/oauth/usage (five_hour.utilization /
+# seven_day.utilization). We draw *remaining* = 100 - utilization.
+#
+# These replace the old token-count estimate (hb["tokens"] vs a guessed
+# 1M/7M ceiling), which had no relationship to the real quota — see
+# buddy/references/protocol.md, where `tokens` is "this turn" and
+# `tokens_today` is "today total", neither a 5h-window nor weekly figure.
 
 
 def _has_cjk(s: str) -> bool:
@@ -388,8 +397,13 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _draw_bar(self, label: str, pct: int, y: int):
-        """Draw a labeled horizontal progress bar. pct=100 means full (all remaining).
+    def _draw_bar(self, label: str, pct, y: int):
+        """Draw a labeled horizontal progress bar showing remaining quota.
+
+        pct is the *remaining* percentage (0..100); pct=100 means the bar is
+        full. pct=None means "no data yet" (the host hasn't sent a real quota
+        figure) — we draw an empty bar and a "--" label rather than inventing
+        a number.
 
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
@@ -397,20 +411,24 @@ class BuddyUI:
         before writing so variable-width strings ("9%" vs "100%") don't leave
         stale pixels from a previous wider value.
         """
-        pct = max(0, min(100, pct))
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
         _LCD.drawString(label, 6, y)
         # Clear a 36 px slot at the right edge for the pct label so that
-        # a shorter string ("9%") always overwrites a longer one ("100%").
+        # a shorter string ("9%" / "--") always overwrites a longer one ("100%").
         _LCD.fillRect(_W - 38, y, 32, 10, BLACK)
-        pct_str = "{}%".format(pct)
+        if pct is None:
+            pct_str = "--"
+            fill_pct = 0
+        else:
+            fill_pct = max(0, min(100, pct))
+            pct_str = "{}%".format(fill_pct)
         _LCD.setTextColor(WHITE, BLACK)
         _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
         bar_y = y + 13
         bar_w = _W - 12
-        fill_w = int(bar_w * pct // 100)
-        color = GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
+        fill_w = int(bar_w * fill_pct // 100)
+        color = GREEN if fill_pct > 50 else (YELLOW if fill_pct > 20 else RED)
         # Draw filled portion then empty portion in one pass — never shows
         # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
@@ -419,12 +437,19 @@ class BuddyUI:
             _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
 
     def _data_pcts(self):
-        """Return (h5_pct, wk_pct) from the last heartbeat."""
+        """Return (h5_remaining, wk_remaining) as 0..100, or None when unknown.
+
+        `five_h_util` / `week_util` are utilization percentages (0..100,
+        "used") the host copies from the usage API; we display *remaining*,
+        i.e. 100 - utilization. A field that's absent (host hasn't sent a
+        real figure yet, or runs an older build) yields None — the bar then
+        renders a "--" no-data state rather than a fabricated number.
+        """
         hb = self._last
-        used_5h = hb.get("tokens", 0)
-        used_today = hb.get("tokens_today", 0)
-        h5_pct = max(0, 100 - used_5h * 100 // max(1, _LIMIT_5H))
-        wk_pct = max(0, 100 - used_today * 7 * 100 // max(1, _LIMIT_WEEK))
+        h5 = hb.get("five_h_util")
+        wk = hb.get("week_util")
+        h5_pct = None if h5 is None else max(0, min(100, 100 - int(h5)))
+        wk_pct = None if wk is None else max(0, min(100, 100 - int(wk)))
         return h5_pct, wk_pct
 
     def _draw_data_rows(self):
