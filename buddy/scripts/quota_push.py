@@ -32,6 +32,14 @@ once you've logged into Claude Code) — same source the `quota-check`
 skill uses. The OAuth token is read fresh on every poll, so token
 refreshes done by Claude Code are picked up automatically.
 
+macOS Bluetooth note: TCC (the privacy permission system) grants
+Bluetooth access **per binary**. Run this from **Terminal.app** (or
+another terminal that has, or will prompt for, Bluetooth permission).
+Launching it indirectly — e.g. from inside another app's Bash subprocess
+— inherits that app's TCC context instead, and CoreBluetooth aborts the
+process with SIGABRT (exit 134) when permission isn't granted to the
+Python binary. `--dry-run` does no BLE and is unaffected.
+
 ### Usage
 
     python quota_push.py                  # scan for a Claude_* buddy, push forever
