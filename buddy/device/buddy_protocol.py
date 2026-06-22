@@ -138,10 +138,6 @@ class BuddyProtocol:
         print("buddy_protocol: unclassified msg, keys:", list(msg.keys()))
 
     def _on_heartbeat(self, hb: dict) -> None:
-        # TEMP DIAGNOSTIC — dump every field Claude.app puts in the
-        # heartbeat so we can see whether a quota/utilization value is
-        # available at all. Remove once captured.
-        print("HB-DUMP keys:", sorted(hb.keys()), "payload:", hb)
         self.ui.update_heartbeat(hb)
         prompt = hb.get("prompt")
         if prompt and prompt.get("id"):
