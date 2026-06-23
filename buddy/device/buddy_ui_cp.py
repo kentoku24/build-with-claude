@@ -79,6 +79,21 @@ CYAN = 0x00FFFF
 YELLOW = 0xFFFF00
 RED = 0xFF0000
 
+# Bar colour by codexbar pace `stage` (see buddy/references/codexbar pace
+# spec). The stage encodes consumption pace vs the even-burn baseline:
+# `*Behind` = under pace (reserve, safe), `onTrack` = on pace, `*Ahead` =
+# over pace (deficit, will run out early). We map the 7 fixed stages onto a
+# green->red ramp so a glance at the colour says "am I overspending?".
+_STAGE_COLORS = {
+    "farBehind":      0x00FF00,  # green  — deep reserve
+    "behind":         0x55FF00,
+    "slightlyBehind": 0xAAFF00,
+    "onTrack":        0xFFFF00,  # yellow — exactly on pace
+    "slightlyAhead":  0xFFAA00,
+    "ahead":          0xFF5500,
+    "farAhead":       0xFF0000,  # red    — heavy deficit
+}
+
 _LCD = M5.Lcd
 
 _W = 240
@@ -372,13 +387,24 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _draw_bar(self, label: str, pct, y: int):
+    def _bar_color(self, pct, stage):
+        """Pick a bar colour. Prefer the codexbar pace `stage` (green=reserve
+        … red=deficit). Fall back to a remaining-% scale when no stage is
+        available — Sonnet has no pace, and codexbar omits pace early in a
+        window."""
+        if stage in _STAGE_COLORS:
+            return _STAGE_COLORS[stage]
+        if pct is None:
+            return GRAY_DIM  # no data; fill isn't drawn anyway
+        return GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
+
+    def _draw_bar(self, label: str, pct, y: int, color: int):
         """Draw a labeled horizontal progress bar showing remaining quota.
 
         pct is the *remaining* percentage (0..100); pct=100 means the bar is
-        full. pct=None means "no data yet" (the host hasn't sent a real quota
-        figure) — we draw an empty bar and a "--" label rather than inventing
-        a number.
+        full. pct=None means "no data yet" — we draw an empty bar and a "--"
+        label rather than inventing a number. `color` is the fill colour,
+        chosen by the caller (pace stage, or remaining-% fallback).
 
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
@@ -403,7 +429,6 @@ class BuddyUI:
         bar_y = y + 13
         bar_w = _W - 12
         fill_w = int(bar_w * fill_pct // 100)
-        color = GREEN if fill_pct > 50 else (YELLOW if fill_pct > 20 else RED)
         # Draw filled portion then empty portion in one pass — never shows
         # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
@@ -435,14 +460,18 @@ class BuddyUI:
         Three rows (5h / Week / Sonnet) at y=24/48/72 — the identity band
         was dropped to make vertical room. A pending prompt occupies the
         Sonnet row's space (prompt box y=74..108), so we hide Sonnet then.
+
+        5h/Week colour by their codexbar pace stage; Sonnet has no pace so
+        it uses the remaining-% fallback.
         """
+        hb = self._last
         h5, wk, snt = self._data_pcts()
-        self._draw_bar("5h", h5, 24)
-        self._draw_bar("Week", wk, 48)
+        self._draw_bar("5h", h5, 24, self._bar_color(h5, hb.get("five_h_stage")))
+        self._draw_bar("Week", wk, 48, self._bar_color(wk, hb.get("week_stage")))
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            self._draw_bar("Sonnet", snt, 72)
+            self._draw_bar("Sonnet", snt, 72, self._bar_color(snt, None))
 
     def _draw_connected_main(self):
         self._draw_data_rows()

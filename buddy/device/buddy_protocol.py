@@ -16,7 +16,8 @@ Host → device messages (what we receive):
         "prompt":{"id":"...","tool":"...","hint":"..."}}
     quota heartbeat from the BLE companion (scripts/quota_push.py):
         {"five_h_util":N, "week_util":N, "sonnet_util":N}  - utilization %
-        (5-hour / 7-day-all / 7-day-Sonnet) from codexbar
+        (5-hour / 7-day-all / 7-day-Sonnet) from codexbar; plus optional
+        "five_h_stage"/"week_stage" pace stages that colour those two bars
 
 Device → host messages (what we emit):
     {"ack":"status","name":..,"sec":true,"bat":{...},"sys":{...},"stats":{...}}
@@ -42,8 +43,9 @@ _HEARTBEAT_FIELDS = (
     # here so a quota-only heartbeat — e.g. {"five_h_util":N,"week_util":N,
     # "sonnet_util":N} with none of the Claude.app fields — is still
     # recognized as a heartbeat and reaches the UI, instead of falling
-    # through to "unclassified".
-    "five_h_util", "week_util", "sonnet_util",
+    # through to "unclassified". five_h_stage / week_stage are codexbar
+    # pace stages that colour the 5h / Week bars (Sonnet has no pace).
+    "five_h_util", "week_util", "sonnet_util", "five_h_stage", "week_stage",
 )
 
 # Unpair is destructive (wipes name/owner/stats and disconnects). The

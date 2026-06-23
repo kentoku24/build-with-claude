@@ -103,20 +103,30 @@ on-device "5h / Week / Sonnet" bars are instead fed by a host companion,
 
 ```
 {
-  "five_h_util": N,   # codexbar usage.primary.usedPercent   (5-hour)
-  "week_util": N,     # codexbar usage.secondary.usedPercent (7-day, all)
-  "sonnet_util": N    # codexbar usage.tertiary.usedPercent  (7-day, Sonnet)
+  "five_h_util": N,      # codexbar usage.primary.usedPercent   (5-hour)
+  "week_util": N,        # codexbar usage.secondary.usedPercent (7-day, all)
+  "sonnet_util": N,      # codexbar usage.tertiary.usedPercent  (7-day, Sonnet)
+  "five_h_stage": "...", # codexbar pace.primary.stage   (optional; colours 5h)
+  "week_stage": "..."    # codexbar pace.secondary.stage (optional; colours Week)
 }
 ```
 
-All three are utilization percentages (0..100, "used"). The codexbar
-mapping was verified against the labeled usage API: `primary`==`five_hour`,
-`secondary`==`seven_day`, `tertiary`==`seven_day_sonnet`. The device
-renders *remaining* = `100 - util` for each, and shows `--` for any field
-it hasn't received (e.g. on the Claude.app link, which sends none). These
-names are in the device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
-`buddy_protocol.py`) so a quota-only message with none of the Claude.app
-fields is still recognized as a heartbeat.
+The `*_util` values are utilization percentages (0..100, "used"); the
+codexbar mapping was verified against the labeled usage API
+(`primary`==`five_hour`, `secondary`==`seven_day`,
+`tertiary`==`seven_day_sonnet`). The device renders *remaining* =
+`100 - util` for the **bar length**, and shows `--` for any field it
+hasn't received (e.g. on the Claude.app link, which sends none).
+
+The `*_stage` values are codexbar **pace stages** (one of `farBehind`,
+`behind`, `slightlyBehind`, `onTrack`, `slightlyAhead`, `ahead`,
+`farAhead`) and set the **bar colour** on a green→red ramp
+(`*Behind`/reserve = green … `*Ahead`/deficit = red). codexbar only
+computes pace for `primary`/`secondary`, so **Sonnet has no stage** and
+falls back to a remaining-% colour; the 5h/Week bars also fall back when
+codexbar omits pace (early in a window). All these names are in the
+device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
+`buddy_protocol.py`) so a quota-only message is recognized as a heartbeat.
 
 **Connection model:** the companion is the BLE central, like Claude.app,
 and a buddy accepts one central at a time — so the companion and

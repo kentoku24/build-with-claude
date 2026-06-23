@@ -4,19 +4,23 @@ The buddy's "5h / Week / Sonnet" bars need real quota figures, but the
 device is BLE-only and Claude.app's Hardware Buddy heartbeat carries no
 quota (see buddy/references/protocol.md). This companion fills that gap:
 it reads the quota from **codexbar** and writes heartbeats containing
-`five_h_util` / `week_util` / `sonnet_util` to the device's Nordic-UART
-RX characteristic, so the bars track the real account quota.
+utilization and pace-stage fields to the device's Nordic-UART RX
+characteristic, so the bars track the real account quota.
 
 Backend: `codexbar --provider anthropic --format json`. Its first array
-entry has `usage.{primary, secondary, tertiary}.usedPercent`:
+entry has `usage.{primary, secondary, tertiary}.usedPercent` (the bar
+length) and `pace.{primary, secondary}.stage` (the bar colour):
 
-    primary   -> five_h_util   (5-hour window,  windowMinutes 300)
-    secondary -> week_util     (7-day, all,     windowMinutes 10080)
-    tertiary  -> sonnet_util   (7-day, Sonnet,  windowMinutes 10080)
+    primary   -> five_h_util  + five_h_stage  (5-hour window)
+    secondary -> week_util    + week_stage    (7-day, all)
+    tertiary  -> sonnet_util                  (7-day, Sonnet; NO pace)
 
 (Mapping verified against the labeled usage API: primary==five_hour,
 secondary==seven_day, tertiary==seven_day_sonnet.) The device renders
-*remaining* = 100 - utilization for each.
+*remaining* = 100 - utilization for the bar length, and colours each bar
+by its codexbar pace `stage` (green=reserve … red=deficit), falling back
+to a remaining-% colour where no stage exists (Sonnet, or a window too
+early for codexbar to emit pace).
 
 ### Connection model (important)
 
@@ -59,11 +63,19 @@ DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
 
-def fetch_utilization():
-    """Return (five_h, week, sonnet) utilization % as ints 0..100; any None.
+def fetch_quota():
+    """Build the heartbeat dict from codexbar.
 
-    Reads codexbar's JSON and maps usage.primary/secondary/tertiary
-    usedPercent to the 5h / weekly-all / weekly-Sonnet windows.
+    Maps usage.primary/secondary/tertiary.usedPercent to the
+    five_h_util / week_util / sonnet_util fields, and the codexbar **pace
+    stage** (pace.primary/secondary.stage) to five_h_stage / week_stage.
+    The device colours each bar by its stage (green=reserve … red=deficit)
+    and falls back to a remaining-% colour where no stage is present
+    (Sonnet has no pace; codexbar also omits pace early in a window).
+
+    Returns e.g. {"five_h_util": 13, "week_util": 13, "sonnet_util": 6,
+    "five_h_stage": "farBehind", "week_stage": "slightlyAhead"}. Absent
+    values are simply omitted.
     """
     try:
         out = subprocess.run(
@@ -82,24 +94,33 @@ def fetch_utilization():
     data = json.loads(out)
     if not data:
         raise RuntimeError("codexbar returned no entries")
-    usage = data[0].get("usage") or {}
+    entry = data[0]
+    usage = entry.get("usage") or {}
+    pace = entry.get("pace") or {}
 
-    def _used(section):
+    hb = {}
+
+    def _used(section, key):
         block = usage.get(section) or {}
         u = block.get("usedPercent")
-        return None if u is None else int(round(u))
+        if u is not None:
+            hb[key] = int(round(u))
 
-    return _used("primary"), _used("secondary"), _used("tertiary")
+    def _stage(section, key):
+        block = pace.get(section) or {}
+        s = block.get("stage")
+        if s:
+            hb[key] = s
+
+    _used("primary", "five_h_util")
+    _used("secondary", "week_util")
+    _used("tertiary", "sonnet_util")
+    _stage("primary", "five_h_stage")   # tertiary (Sonnet) has no pace
+    _stage("secondary", "week_stage")
+    return hb
 
 
-def _heartbeat_line(five, week, sonnet) -> bytes:
-    hb = {}
-    if five is not None:
-        hb["five_h_util"] = five
-    if week is not None:
-        hb["week_util"] = week
-    if sonnet is not None:
-        hb["sonnet_util"] = sonnet
+def _heartbeat_line(hb: dict) -> bytes:
     return (json.dumps(hb) + "\n").encode("utf-8")
 
 
@@ -132,11 +153,9 @@ async def _run(address, name_prefix, interval, once):
         print("connected; pushing quota every %ds (Ctrl-C to stop)" % interval)
         while True:
             try:
-                five, week, sonnet = fetch_utilization()
-                await client.write_gatt_char(
-                    NUS_RX_UUID, _heartbeat_line(five, week, sonnet), response=False
-                )
-                print("pushed five_h_util=%s week_util=%s sonnet_util=%s" % (five, week, sonnet))
+                hb = fetch_quota()
+                await client.write_gatt_char(NUS_RX_UUID, _heartbeat_line(hb), response=False)
+                print("pushed %s" % hb)
             except Exception as e:  # keep the link up across transient errors
                 print("push error: %s" % e)
             if once:
@@ -162,14 +181,17 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.dry_run:
-        five, week, sonnet = fetch_utilization()
+        hb = fetch_quota()
 
-        def rem(u):
-            return "--" if u is None else 100 - u
+        def line(util_key, stage_key, label):
+            u = hb.get(util_key)
+            rem = "--" if u is None else "%d%%" % (100 - u)
+            stage = hb.get(stage_key, "n/a")
+            return "%s: %s remaining (stage=%s)" % (label, rem, stage)
 
-        print("five_h_util=%s week_util=%s sonnet_util=%s  ->  "
-              "5h remaining=%s%%  week remaining=%s%%  sonnet remaining=%s%%" % (
-                  five, week, sonnet, rem(five), rem(week), rem(sonnet)))
+        print(line("five_h_util", "five_h_stage", "5h"))
+        print(line("week_util", "week_stage", "Week"))
+        print(line("sonnet_util", "_none", "Sonnet"))  # tertiary has no pace
         return 0
 
     try:
