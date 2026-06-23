@@ -121,7 +121,9 @@ hasn't received (e.g. on the Claude.app link, which sends none).
 
 The `*_color` values are **plain RGB ints the device paints directly** —
 no colour logic on the device. The companion resolves them host-side from
-the codexbar **pace stage** (`farBehind`…`farAhead`) on a green→red ramp
+the codexbar **pace stage** (`farBehind`…`farAhead`; see
+[codexbar-pace.md](codexbar-pace.md) for the full response spec) on a
+green→red ramp
 (`*Behind`/reserve = green … `*Ahead`/deficit = red), with a remaining-%
 fallback where there's no stage (Sonnet always; 5h/Week when codexbar
 omits pace early in a window). Keeping the stage→colour map on the host

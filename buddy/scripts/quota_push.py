@@ -16,6 +16,10 @@ colour here, host-side):
     secondary -> week_util   + week_color    (7-day, all)
     tertiary  -> sonnet_util + sonnet_color  (7-day, Sonnet; NO pace)
 
+The full codexbar response shape (usage + pace, stage enum, guards) is
+documented in buddy/references/codexbar-pace.md — pace only exists in
+steipete/CodexBar#1722, so that file is our record of what we parse here.
+
 (Mapping verified against the labeled usage API: primary==five_hour,
 secondary==seven_day, tertiary==seven_day_sonnet.) `<name>_util` gives
 the device its bar length (*remaining* = 100 - util). `<name>_color` is
