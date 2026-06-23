@@ -52,8 +52,8 @@ to size 4 for cross-room readability.
 
   Connected with heartbeat (no identity band — reused for a 3rd bar):
     y=0..20    header ("Claude Buddy" + status)
-    y=24       "5h" quota bar     (100 - five_h_util)
-    y=48       "Week" quota bar   (100 - week_util)
+    y=24       "5h" quota bar     (100 - five_h_util; expected-pace tick)
+    y=48       "Week" quota bar   (100 - week_util; expected-pace tick)
     y=72       "Sonnet" quota bar (100 - sonnet_util; hidden while a prompt is up)
     y=74..108  prompt box (when a permission is pending)
     y=112..134 hint strip (Y once / N deny / Q exit columns)
@@ -153,10 +153,15 @@ _GLINT_PROFILE = _build_glint_profile(_GLINT_W, _GLINT_SLICE, _GLINT_CORE)
 #   five_h_util / week_util / sonnet_util   - utilization % (0..100, "used")
 #                                             -> bar length = 100 - util
 #   five_h_color / week_color / sonnet_color - RGB int -> bar fill colour
+#   five_h_expected / week_expected          - even-burn baseline % (a *used*
+#                                             %) -> expected-pace tick position
+#   five_h_expected_color / week_expected_color - RGB int -> tick colour
 # The host derives the colour from the codexbar pace stage (and a
 # remaining-% fallback for windows with no pace); the device just paints
 # it. Keeping the stage->colour map host-side means colours can be retuned
-# without re-flashing.
+# without re-flashing. The expected tick (5h / Week only — Sonnet has no
+# pace) marks CodexBar's expectedUsedPercent: green where you're under the
+# baseline (in reserve), red where you're over it (in deficit).
 #
 # Claude.app's own heartbeat carries none of these, so on that link the
 # bars read "--". See buddy/references/protocol.md.
@@ -472,7 +477,20 @@ class BuddyUI:
         a colour with a util)."""
         return GRAY_MID if color is None else color
 
-    def _draw_bar(self, label: str, pct, y: int, color: int):
+    def _draw_marker(self, bar_y: int, mx: int, color: int):
+        """Paint the expected-pace tick: a 2 px coloured column with a 1 px
+        black border on each side, spanning the bar height.
+
+        The border is what makes it readable regardless of background — the
+        tick can land on a same-hue pace fill (reserve: a green tick inside a
+        green fill) or on the gray remainder (deficit), and the black edges
+        keep it crisp either way. tick_anim repaints it after the glint sweeps
+        through, so it survives the shimmer."""
+        _LCD.fillRect(mx - 1, bar_y, 4, 8, BLACK)
+        _LCD.fillRect(mx, bar_y, 2, 8, color)
+
+    def _draw_bar(self, label: str, pct, y: int, color: int,
+                  expected=None, line_color=None):
         """Draw a labeled horizontal progress bar showing remaining quota.
 
         pct is the *remaining* percentage (0..100); pct=100 means the bar is
@@ -480,14 +498,22 @@ class BuddyUI:
         label rather than inventing a number. `color` is the fill colour,
         chosen by the caller (pace stage, or remaining-% fallback).
 
+        `expected` (a *used* %, 0..100) and `line_color` add CodexBar's
+        expected-pace tick. Because the bar fills *remaining* from the left,
+        a used-% maps to x = 6 + bar_w*(100-expected)/100: the tick lands
+        inside the fill when actual used < expected (in reserve) and on the
+        gray remainder when used > expected (in deficit) — which is why the
+        host colours it green vs red. Both None -> no tick (e.g. Sonnet).
+
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
         updates.  The percentage text area is always cleared to a fixed width
         before writing so variable-width strings ("9%" vs "100%") don't leave
         stale pixels from a previous wider value.
 
-        Returns (bar_y, fill_w) so _draw_data_rows can record the filled region
-        for tick_anim's glint to sweep across.
+        Returns (bar_y, fill_w, marker) where marker is (mx, line_color) or
+        None — _draw_data_rows records the filled region for tick_anim's glint
+        to sweep across, and the marker so the glint can repaint it.
         """
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
@@ -512,7 +538,18 @@ class BuddyUI:
             _LCD.fillRect(6, bar_y, fill_w, 8, color)
         if fill_w < bar_w:
             _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
-        return bar_y, fill_w
+        # Expected-pace tick on top of the just-drawn fill/gray. Clamp so the
+        # 4 px-wide marker (1 px border each side) stays within [6, 6+bar_w).
+        marker = None
+        if expected is not None and line_color is not None:
+            mx = 6 + (bar_w * (100 - max(0, min(100, expected)))) // 100
+            if mx < 7:
+                mx = 7
+            elif mx > 6 + bar_w - 3:
+                mx = 6 + bar_w - 3
+            self._draw_marker(bar_y, mx, line_color)
+            marker = (mx, line_color)
+        return bar_y, fill_w, marker
 
     def _data_pcts(self):
         """Return (h5, wk, sonnet) remaining % (0..100), each None if unknown.
@@ -546,19 +583,24 @@ class BuddyUI:
         h5, wk, snt = self._data_pcts()
         bars = []
         c5 = self._bar_color(hb.get("five_h_color"))
-        by, fw = self._draw_bar("5h", h5, 24, c5)
-        bars.append({"bar_y": by, "fill_w": fw, "color": c5})
+        by, fw, mk = self._draw_bar("5h", h5, 24, c5,
+                                    hb.get("five_h_expected"),
+                                    hb.get("five_h_expected_color"))
+        bars.append({"bar_y": by, "fill_w": fw, "color": c5, "marker": mk})
         cw = self._bar_color(hb.get("week_color"))
-        by, fw = self._draw_bar("Week", wk, 48, cw)
-        bars.append({"bar_y": by, "fill_w": fw, "color": cw})
+        by, fw, mk = self._draw_bar("Week", wk, 48, cw,
+                                    hb.get("week_expected"),
+                                    hb.get("week_expected_color"))
+        bars.append({"bar_y": by, "fill_w": fw, "color": cw, "marker": mk})
         if self._prompt:
             # The prompt box (y=74..108) takes the Sonnet row — don't animate
             # a bar that isn't drawn. 5h/Week stay live above it.
             self._draw_prompt_box(self._prompt)
         else:
             cs = self._bar_color(hb.get("sonnet_color"))
-            by, fw = self._draw_bar("Sonnet", snt, 72, cs)
-            bars.append({"bar_y": by, "fill_w": fw, "color": cs})
+            # Sonnet (tertiary) has no pace, so no expected tick.
+            by, fw, mk = self._draw_bar("Sonnet", snt, 72, cs)
+            bars.append({"bar_y": by, "fill_w": fw, "color": cs, "marker": mk})
         # Replacing the list (vs mutating) means a fresh solid fill was just
         # painted under every bar, so any in-flight glint is already gone and
         # tick_anim restarts cleanly on its next frame.
@@ -654,6 +696,14 @@ class BuddyUI:
                         r_lo = new_hi if new_hi > p_lo else p_lo
                         _LCD.fillRect(r_lo, by, p_hi - r_lo, 8, base)
             bar["glint"] = (new_lo, new_hi) if has_new else None
+            # The glint repaints [6, 6+fw) to base, wiping an expected tick
+            # that sits inside the fill (the reserve case). Repaint it on top
+            # after the sweep/cleanup so it stays put while the shimmer slides
+            # behind it. A deficit tick lands on the gray remainder, which the
+            # glint never touches, so it's left alone.
+            mk = bar.get("marker")
+            if mk is not None and mk[0] - 1 < x1:
+                self._draw_marker(by, mk[0], mk[1])
 
     def _draw_glint(self, bar, gx):
         """Paint the soft highlight band onto one bar's fill, clipped to it.
