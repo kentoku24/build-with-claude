@@ -3,20 +3,27 @@
 The buddy's "5h / Week / Sonnet" bars need real quota figures, but the
 device is BLE-only and Claude.app's Hardware Buddy heartbeat carries no
 quota (see buddy/references/protocol.md). This companion fills that gap:
-it reads the quota from **codexbar** and writes heartbeats containing
-`five_h_util` / `week_util` / `sonnet_util` to the device's Nordic-UART
-RX characteristic, so the bars track the real account quota.
+it reads the quota from **codexbar** and writes, per heartbeat, a bar
+length and a bar colour for each window to the device's Nordic-UART RX
+characteristic, so the bars track the real account quota.
 
 Backend: `codexbar --provider anthropic --format json`. Its first array
-entry has `usage.{primary, secondary, tertiary}.usedPercent`:
+entry has `usage.{primary, secondary, tertiary}.usedPercent` (the bar
+length) and `pace.{primary, secondary}.stage` (which we turn into a
+colour here, host-side):
 
-    primary   -> five_h_util   (5-hour window,  windowMinutes 300)
-    secondary -> week_util     (7-day, all,     windowMinutes 10080)
-    tertiary  -> sonnet_util   (7-day, Sonnet,  windowMinutes 10080)
+    primary   -> five_h_util + five_h_color  (5-hour window)
+    secondary -> week_util   + week_color    (7-day, all)
+    tertiary  -> sonnet_util + sonnet_color  (7-day, Sonnet; NO pace)
 
 (Mapping verified against the labeled usage API: primary==five_hour,
-secondary==seven_day, tertiary==seven_day_sonnet.) The device renders
-*remaining* = 100 - utilization for each.
+secondary==seven_day, tertiary==seven_day_sonnet.) `<name>_util` gives
+the device its bar length (*remaining* = 100 - util). `<name>_color` is
+an RGB int the device paints directly — resolved here from the codexbar
+pace stage via `_STAGE_COLORS` (green=reserve … red=deficit), with a
+remaining-% fallback where there's no stage (Sonnet, or a window too
+early for codexbar to emit pace). Keeping the colour map in this script
+means you can retune colours without re-flashing the device.
 
 ### Connection model (important)
 
@@ -58,13 +65,37 @@ CODEXBAR_CMD = ["codexbar", "--provider", "anthropic", "--format", "json"]
 DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
+# Bar colour (RGB int 0xRRGGBB) per codexbar pace stage. The stage encodes
+# consumption pace vs an even burn: *Behind = under pace (reserve, safe),
+# onTrack = on pace, *Ahead = over pace (deficit, runs out early). We ramp
+# green->red. This map lives host-side on purpose: tweak it and restart the
+# script — no device re-flash needed (the device just paints what we send).
+_STAGE_COLORS = {
+    "farBehind":      0x00FF00,  # green  — deep reserve
+    "behind":         0x55FF00,
+    "slightlyBehind": 0xAAFF00,
+    "onTrack":        0xFFFF00,  # yellow — exactly on pace
+    "slightlyAhead":  0xFFAA00,
+    "ahead":          0xFF5500,
+    "farAhead":       0xFF0000,  # red    — heavy deficit
+}
 
-def fetch_utilization():
-    """Return (five_h, week, sonnet) utilization % as ints 0..100; any None.
 
-    Reads codexbar's JSON and maps usage.primary/secondary/tertiary
-    usedPercent to the 5h / weekly-all / weekly-Sonnet windows.
-    """
+def _color_for(util, stage):
+    """Resolve a bar colour (RGB int) or None. Prefer the pace stage; else
+    a remaining-% scale (Sonnet has no pace, and codexbar omits pace early
+    in a window). None only when there's no utilization at all."""
+    if stage in _STAGE_COLORS:
+        return _STAGE_COLORS[stage]
+    if util is None:
+        return None
+    remaining = 100 - util
+    return 0x00FF00 if remaining > 50 else (0xFFFF00 if remaining > 20 else 0xFF0000)
+
+
+def _read_codexbar():
+    """Run codexbar and return {name: (used%|None, stage|None)} for the
+    five_h / week / sonnet windows (primary / secondary / tertiary)."""
     try:
         out = subprocess.run(
             CODEXBAR_CMD, capture_output=True, text=True, check=True, timeout=20,
@@ -82,24 +113,45 @@ def fetch_utilization():
     data = json.loads(out)
     if not data:
         raise RuntimeError("codexbar returned no entries")
-    usage = data[0].get("usage") or {}
+    entry = data[0]
+    usage = entry.get("usage") or {}
+    pace = entry.get("pace") or {}
 
-    def _used(section):
-        block = usage.get(section) or {}
-        u = block.get("usedPercent")
+    def used(section):
+        u = (usage.get(section) or {}).get("usedPercent")
         return None if u is None else int(round(u))
 
-    return _used("primary"), _used("secondary"), _used("tertiary")
+    def stage(section):
+        return (pace.get(section) or {}).get("stage")
+
+    return {
+        "five_h": (used("primary"), stage("primary")),
+        "week": (used("secondary"), stage("secondary")),
+        "sonnet": (used("tertiary"), None),   # tertiary (Sonnet) has no pace
+    }
 
 
-def _heartbeat_line(five, week, sonnet) -> bytes:
+def fetch_quota():
+    """Build the heartbeat dict: per window, `<name>_util` (bar length =
+    100-util) and `<name>_color` (RGB int the device paints directly).
+    Colour resolution happens here, host-side, so it's tunable without a
+    device re-flash. Windows with no utilization are omitted.
+
+    e.g. {"five_h_util": 14, "five_h_color": 65280, "week_util": 13,
+          "week_color": 16755200, "sonnet_util": 6, "sonnet_color": 65280}
+    """
     hb = {}
-    if five is not None:
-        hb["five_h_util"] = five
-    if week is not None:
-        hb["week_util"] = week
-    if sonnet is not None:
-        hb["sonnet_util"] = sonnet
+    for name, (util, stage) in _read_codexbar().items():
+        if util is None:
+            continue
+        hb[name + "_util"] = util
+        color = _color_for(util, stage)
+        if color is not None:
+            hb[name + "_color"] = color
+    return hb
+
+
+def _heartbeat_line(hb: dict) -> bytes:
     return (json.dumps(hb) + "\n").encode("utf-8")
 
 
@@ -132,11 +184,9 @@ async def _run(address, name_prefix, interval, once):
         print("connected; pushing quota every %ds (Ctrl-C to stop)" % interval)
         while True:
             try:
-                five, week, sonnet = fetch_utilization()
-                await client.write_gatt_char(
-                    NUS_RX_UUID, _heartbeat_line(five, week, sonnet), response=False
-                )
-                print("pushed five_h_util=%s week_util=%s sonnet_util=%s" % (five, week, sonnet))
+                hb = fetch_quota()
+                await client.write_gatt_char(NUS_RX_UUID, _heartbeat_line(hb), response=False)
+                print("pushed %s" % hb)
             except Exception as e:  # keep the link up across transient errors
                 print("push error: %s" % e)
             if once:
@@ -162,14 +212,14 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.dry_run:
-        five, week, sonnet = fetch_utilization()
-
-        def rem(u):
-            return "--" if u is None else 100 - u
-
-        print("five_h_util=%s week_util=%s sonnet_util=%s  ->  "
-              "5h remaining=%s%%  week remaining=%s%%  sonnet remaining=%s%%" % (
-                  five, week, sonnet, rem(five), rem(week), rem(sonnet)))
+        raw = _read_codexbar()
+        for name, label in (("five_h", "5h"), ("week", "Week"), ("sonnet", "Sonnet")):
+            util, stage = raw[name]
+            rem = "--" if util is None else "%d%%" % (100 - util)
+            color = _color_for(util, stage)
+            color_s = "n/a" if color is None else "0x%06X" % color
+            print("%-6s: %s remaining  stage=%-13s color=%s" % (
+                label, rem, stage or "n/a", color_s))
         return 0
 
     try:

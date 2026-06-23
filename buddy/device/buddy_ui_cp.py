@@ -87,10 +87,14 @@ _H = 135
 # Usage bars render the *real* Claude quota, which only the host knows.
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
 # coexistence) so it can't query usage itself — the host companion
-# (scripts/quota_push.py, backed by `codexbar`) sends the figures in each
-# heartbeat as `five_h_util` / `week_util` / `sonnet_util`: utilization
-# percentages (0..100, "used") for the 5-hour, 7-day-all, and 7-day-Sonnet
-# windows. We draw *remaining* = 100 - utilization.
+# (scripts/quota_push.py, backed by `codexbar`) sends, per heartbeat:
+#   five_h_util / week_util / sonnet_util   - utilization % (0..100, "used")
+#                                             -> bar length = 100 - util
+#   five_h_color / week_color / sonnet_color - RGB int -> bar fill colour
+# The host derives the colour from the codexbar pace stage (and a
+# remaining-% fallback for windows with no pace); the device just paints
+# it. Keeping the stage->colour map host-side means colours can be retuned
+# without re-flashing.
 #
 # Claude.app's own heartbeat carries none of these, so on that link the
 # bars read "--". See buddy/references/protocol.md.
@@ -372,13 +376,22 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _draw_bar(self, label: str, pct, y: int):
+    def _bar_color(self, color):
+        """Bar fill colour. The host (scripts/quota_push.py) resolves the
+        codexbar pace stage — and the remaining-% fallback for windows with
+        no pace — into an RGB int and sends it per bar, so the device just
+        paints what it's told. GRAY_MID is only a defensive default for a
+        bar with data but no colour (shouldn't happen: the host always pairs
+        a colour with a util)."""
+        return GRAY_MID if color is None else color
+
+    def _draw_bar(self, label: str, pct, y: int, color: int):
         """Draw a labeled horizontal progress bar showing remaining quota.
 
         pct is the *remaining* percentage (0..100); pct=100 means the bar is
-        full. pct=None means "no data yet" (the host hasn't sent a real quota
-        figure) — we draw an empty bar and a "--" label rather than inventing
-        a number.
+        full. pct=None means "no data yet" — we draw an empty bar and a "--"
+        label rather than inventing a number. `color` is the fill colour,
+        chosen by the caller (pace stage, or remaining-% fallback).
 
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
@@ -403,7 +416,6 @@ class BuddyUI:
         bar_y = y + 13
         bar_w = _W - 12
         fill_w = int(bar_w * fill_pct // 100)
-        color = GREEN if fill_pct > 50 else (YELLOW if fill_pct > 20 else RED)
         # Draw filled portion then empty portion in one pass — never shows
         # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
@@ -435,14 +447,18 @@ class BuddyUI:
         Three rows (5h / Week / Sonnet) at y=24/48/72 — the identity band
         was dropped to make vertical room. A pending prompt occupies the
         Sonnet row's space (prompt box y=74..108), so we hide Sonnet then.
+
+        Bar length is remaining quota; bar colour is whatever the host sent
+        (`*_color`, derived from the codexbar pace stage on the Mac side).
         """
+        hb = self._last
         h5, wk, snt = self._data_pcts()
-        self._draw_bar("5h", h5, 24)
-        self._draw_bar("Week", wk, 48)
+        self._draw_bar("5h", h5, 24, self._bar_color(hb.get("five_h_color")))
+        self._draw_bar("Week", wk, 48, self._bar_color(hb.get("week_color")))
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            self._draw_bar("Sonnet", snt, 72)
+            self._draw_bar("Sonnet", snt, 72, self._bar_color(hb.get("sonnet_color")))
 
     def _draw_connected_main(self):
         self._draw_data_rows()
