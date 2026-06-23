@@ -140,7 +140,7 @@ def _upload_file(s: serial.Serial, src_path: str, dest_name: str) -> None:
     sys.stderr.write("\n")
 
     tail = "fp.close()\nprint('WROTE', '{}')\n".format(dest_name)
-    out = _paste(s, tail, settle=0.2)
+    out = _paste(s, tail, settle=1.0)
     if "WROTE {}".format(dest_name) not in out:
         raise RuntimeError("close/verify failed:\n" + out)
 
