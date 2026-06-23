@@ -25,7 +25,7 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 The **5h / Week / Sonnet** bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `sonnet_util` heartbeats to the device, which renders `100 − utilization` for each.
 
-The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). Sonnet has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
+The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). Sonnet has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the heartbeat wire format, and [references/codexbar-pace.md](references/codexbar-pace.md) for the full codexbar `usage`/`pace` response spec (stage enum, guards, mapping).
 
 ### Show quota on the device — runbook
 
@@ -80,7 +80,9 @@ python3 scripts/repl_run.py --port /dev/cu.usbmodem1101 --script "import os; pri
 
 ## References
 
-- `references/` — BLE protocol notes for the Claude Buddy app
+- [`references/protocol.md`](references/protocol.md) — BLE heartbeat / command wire format
+- [`references/codexbar-pace.md`](references/codexbar-pace.md) — codexbar `usage`/`pace` JSON response spec (the `quota_push.py` backend)
+- [`references/ble_on_micropython.md`](references/ble_on_micropython.md) — BLE-on-MicroPython notes
 
 ## License
 
