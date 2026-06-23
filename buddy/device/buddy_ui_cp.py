@@ -557,7 +557,16 @@ class BuddyUI:
             stats.get("deny", 0),
         )
         pct = max(0, min(100, battery.get("pct", 0)))
-        right = "{}%".format(pct)
+        rem = battery.get("remaining_min")
+        if rem is not None:
+            if rem >= 120:
+                right = "{}% ~{}h".format(pct, rem // 60)
+            elif rem >= 60:
+                right = "{}% ~{}h{}m".format(pct, rem // 60, rem % 60)
+            else:
+                right = "{}% ~{}m".format(pct, rem)
+        else:
+            right = "{}%".format(pct)
 
         if left != self._last_footer_left:
             _LCD.fillRect(0, 96, (_W * 2) // 3, 15, BLACK)

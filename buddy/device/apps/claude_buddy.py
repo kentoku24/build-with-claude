@@ -73,16 +73,31 @@ import buddy_ui_cp as buddy_ui
 
 # ---- battery reader
 #
-# M5.Power on UIFlow 2.0 wraps the AXP2101 PMIC on the Cardputer-Adv
-# and exposes getBatteryLevel() / getBatteryVoltage() / isCharging()
-# directly — no I2C register spelunking needed.
+# M5.Power on UIFlow 2.0 wraps the AXP2101 PMIC on the Cardputer-Adv.
+# Internal 120mAh + backpack 1400mAh are wired in parallel on the same
+# BAT rail, so AXP2101 sees them as a single ~1520mAh source.
+#
+# Remaining-time estimate: use getBatteryCurrent() if the AXP2101
+# returns a real value (> 0); otherwise fall back to a fixed 90mA
+# typical draw for BLE-active Cardputer-Adv. `remaining_min` is None
+# while charging so the UI can suppress the estimate.
+_TOTAL_MAH = 1520
+_FALLBACK_MA = 90
+
 def _read_battery():
     p = M5.Power
+    pct = max(0, min(100, p.getBatteryLevel()))
+    charging = bool(p.isCharging())
+    mA = p.getBatteryCurrent()
+    if mA <= 0:
+        mA = _FALLBACK_MA
+    remaining_min = None if charging else int(_TOTAL_MAH * pct / 100 * 60 / mA)
     return {
-        "pct": max(0, min(100, p.getBatteryLevel())),
+        "pct": pct,
         "mV": p.getBatteryVoltage(),
-        "mA": 0,
-        "usb": bool(p.isCharging()),
+        "mA": mA,
+        "usb": charging,
+        "remaining_min": remaining_min,
     }
 
 
