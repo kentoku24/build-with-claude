@@ -578,9 +578,16 @@ class BuddyUI:
         Cheap and self-gating: returns immediately unless we're in the
         connected steady state (no passkey / unpair overlay), self-throttles
         to _GLINT_FRAME_MS, and short-circuits during the rest gap after one
-        cleanup frame. Each active frame repaints each bar's solid fill (a
-        single fillRect) and draws the glint over it — never a black clear,
-        so no flicker, mirroring _draw_bar's single-pass discipline.
+        cleanup frame.
+
+        Flicker-free by writing every pixel at most once per frame: the band
+        slices are drawn straight over the previous frame's gradient (colour ->
+        colour, no flat intermediate), and only the columns the band has
+        *vacated* since last frame are repainted to base. The static fill is
+        never re-touched after _draw_bar paints it once — repainting the whole
+        fill every frame (the old approach) flashed the band flat-to-gradient
+        20x/s, which the panel shows directly since there's no frame buffer.
+        Each bar's last-drawn glint span is cached in bar["glint"].
         """
         if (
             self._connection_state in ("advertising", "disconnected")
@@ -613,12 +620,40 @@ class BuddyUI:
         for bar in self._anim_bars:
             fw = bar["fill_w"]
             if fw <= 0:
+                bar["glint"] = None
                 continue
-            # Repaint the solid fill (clears the previous frame's glint) then
-            # lay the new glint on top, both in the same pass.
-            _LCD.fillRect(6, bar["bar_y"], fw, 8, bar["color"])
-            if gx is not None:
+            x0 = 6
+            x1 = 6 + fw
+            by = bar["bar_y"]
+            base = bar["color"]
+            # New band span, clipped to the filled width (empty while resting
+            # or while the band sits entirely off this bar's fill).
+            if gx is None:
+                new_lo = new_hi = 0
+            else:
+                new_lo = gx if gx > x0 else x0
+                gxe = gx + _GLINT_W
+                new_hi = gxe if gxe < x1 else x1
+            has_new = new_hi > new_lo
+            # Draw the new gradient directly over the old one — in-band columns
+            # go colour -> colour with no flat intermediate, so no flicker.
+            if has_new:
                 self._draw_glint(bar, gx)
+            # Repaint to base ONLY the columns the band has vacated since last
+            # frame; everything else is left as _draw_bar painted it.
+            prev = bar.get("glint")
+            if prev is not None:
+                p_lo, p_hi = prev
+                if not has_new:
+                    _LCD.fillRect(p_lo, by, p_hi - p_lo, 8, base)
+                else:
+                    if p_lo < new_lo:
+                        r_hi = new_lo if new_lo < p_hi else p_hi
+                        _LCD.fillRect(p_lo, by, r_hi - p_lo, 8, base)
+                    if p_hi > new_hi:
+                        r_lo = new_hi if new_hi > p_lo else p_lo
+                        _LCD.fillRect(r_lo, by, p_hi - r_lo, 8, base)
+            bar["glint"] = (new_lo, new_hi) if has_new else None
 
     def _draw_glint(self, bar, gx):
         """Paint the soft highlight band onto one bar's fill, clipped to it.
