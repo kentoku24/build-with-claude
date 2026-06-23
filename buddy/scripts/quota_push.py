@@ -29,6 +29,20 @@ remaining-% fallback where there's no stage (Sonnet, or a window too
 early for codexbar to emit pace). Keeping the colour map in this script
 means you can retune colours without re-flashing the device.
 
+For the 5h / Week windows we additionally send the even-burn baseline so
+the device can draw CodexBar's expected-pace marker — a small tick on the
+bar at the `expectedUsedPercent` position:
+
+    five_h_expected + five_h_expected_color   (pace.primary)
+    week_expected   + week_expected_color     (pace.secondary)
+
+`<name>_expected` is `pace.<window>.expectedUsedPercent` (the % you'd be
+at on an even burn). `<name>_expected_color` is the tick colour, resolved
+here from the stage sign: green when behind the baseline (in reserve),
+red when ahead (in deficit), yellow when on pace. Both keys are omitted
+when codexbar emits no pace for that window (see the Guards in
+codexbar-pace.md). Sonnet (tertiary) never carries pace -> no tick.
+
 ### Connection model (important)
 
 This script is the BLE **central**, exactly like Claude.app. A buddy
@@ -61,11 +75,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-CODEXBAR_CMD = ["codexbar", "--provider", "anthropic", "--format", "json"]
+# Which codexbar binary to shell out to. `pace` (the bar-colour + expected
+# tick source) only exists in builds carrying steipete/CodexBar#1722, which
+# isn't in the released CLI yet — set CODEXBAR_BIN to a from-source build of
+# that PR (e.g. .../CodexBar/.build/release/CodexBarCLI) to get it. Defaults
+# to plain `codexbar` on PATH (no pace -> bars colour by remaining-% only,
+# no expected tick).
+CODEXBAR_BIN = os.environ.get("CODEXBAR_BIN", "codexbar")
+CODEXBAR_CMD = [CODEXBAR_BIN, "--provider", "anthropic", "--format", "json"]
 DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
@@ -97,17 +119,42 @@ def _color_for(util, stage):
     return 0x00FF00 if remaining > 50 else (0xFFFF00 if remaining > 20 else 0xFF0000)
 
 
+# Stage buckets for the expected-pace tick. The CLI never colours the tick
+# itself — we derive a binary reserve/deficit (+ on-pace) signal from the
+# stage sign here so the device draws green/red/yellow without knowing the
+# enum. Mirrors the codexbar-pace.md table: *Behind = under the baseline
+# (reserve), *Ahead = over it (deficit), onTrack = on pace.
+_RESERVE_STAGES = ("farBehind", "behind", "slightlyBehind")
+_DEFICIT_STAGES = ("slightlyAhead", "ahead", "farAhead")
+
+
+def _line_color_for(stage):
+    """Colour (RGB int) of the expected-pace tick, or None if the stage
+    can't be classified (no pace -> no tick). Green = in reserve, red = in
+    deficit, yellow = on pace."""
+    if stage in _RESERVE_STAGES:
+        return 0x00FF00  # green — under the baseline, in reserve
+    if stage in _DEFICIT_STAGES:
+        return 0xFF0000  # red   — over the baseline, in deficit
+    if stage == "onTrack":
+        return 0xFFFF00  # yellow — on pace
+    return None
+
+
 def _read_codexbar():
-    """Run codexbar and return {name: (used%|None, stage|None)} for the
-    five_h / week / sonnet windows (primary / secondary / tertiary)."""
+    """Run codexbar and return {name: (used%|None, stage|None, expected%|None)}
+    for the five_h / week / sonnet windows (primary / secondary / tertiary).
+    `expected` is pace.<window>.expectedUsedPercent — the even-burn baseline
+    the device marks with a tick (None when codexbar emits no pace)."""
     try:
         out = subprocess.run(
             CODEXBAR_CMD, capture_output=True, text=True, check=True, timeout=20,
         ).stdout
     except FileNotFoundError:
         raise SystemExit(
-            "codexbar not found on PATH. Install it (e.g. `brew install codexbar`) "
-            "and make sure `codexbar --provider anthropic --format json` works."
+            "codexbar binary not found: %r. Install it (e.g. `brew install codexbar`) "
+            "or set CODEXBAR_BIN to a build, and make sure "
+            "`%s --provider anthropic --format json` works." % (CODEXBAR_BIN, CODEXBAR_BIN)
         )
     except subprocess.TimeoutExpired:
         raise SystemExit("codexbar timed out.")
@@ -128,10 +175,14 @@ def _read_codexbar():
     def stage(section):
         return (pace.get(section) or {}).get("stage")
 
+    def expected(section):
+        e = (pace.get(section) or {}).get("expectedUsedPercent")
+        return None if e is None else int(round(e))
+
     return {
-        "five_h": (used("primary"), stage("primary")),
-        "week": (used("secondary"), stage("secondary")),
-        "sonnet": (used("tertiary"), None),   # tertiary (Sonnet) has no pace
+        "five_h": (used("primary"), stage("primary"), expected("primary")),
+        "week": (used("secondary"), stage("secondary"), expected("secondary")),
+        "sonnet": (used("tertiary"), None, None),  # tertiary (Sonnet) has no pace
     }
 
 
@@ -141,17 +192,28 @@ def fetch_quota():
     Colour resolution happens here, host-side, so it's tunable without a
     device re-flash. Windows with no utilization are omitted.
 
-    e.g. {"five_h_util": 14, "five_h_color": 65280, "week_util": 13,
+    For 5h / Week, also `<name>_expected` (the even-burn baseline %) and
+    `<name>_expected_color` (the tick colour) when codexbar emits pace.
+
+    e.g. {"five_h_util": 14, "five_h_color": 65280, "five_h_expected": 27,
+          "five_h_expected_color": 65280, "week_util": 13,
           "week_color": 16755200, "sonnet_util": 6, "sonnet_color": 65280}
     """
     hb = {}
-    for name, (util, stage) in _read_codexbar().items():
+    for name, (util, stage, expected) in _read_codexbar().items():
         if util is None:
             continue
         hb[name + "_util"] = util
         color = _color_for(util, stage)
         if color is not None:
             hb[name + "_color"] = color
+        # Expected-pace tick: only when codexbar gave us a baseline and a
+        # classifiable stage (5h / Week; Sonnet has no pace).
+        if expected is not None:
+            line_color = _line_color_for(stage)
+            if line_color is not None:
+                hb[name + "_expected"] = expected
+                hb[name + "_expected_color"] = line_color
     return hb
 
 
@@ -218,12 +280,18 @@ def main(argv=None):
     if args.dry_run:
         raw = _read_codexbar()
         for name, label in (("five_h", "5h"), ("week", "Week"), ("sonnet", "Sonnet")):
-            util, stage = raw[name]
+            util, stage, expected = raw[name]
             rem = "--" if util is None else "%d%%" % (100 - util)
             color = _color_for(util, stage)
             color_s = "n/a" if color is None else "0x%06X" % color
-            print("%-6s: %s remaining  stage=%-13s color=%s" % (
-                label, rem, stage or "n/a", color_s))
+            if expected is None:
+                exp_s = "--"
+            else:
+                lc = _line_color_for(stage)
+                exp_s = "%d%% (%s)" % (
+                    expected, "n/a" if lc is None else "0x%06X" % lc)
+            print("%-6s: %s remaining  stage=%-13s color=%s  expected=%s" % (
+                label, rem, stage or "n/a", color_s, exp_s))
         return 0
 
     try:

@@ -17,7 +17,9 @@ Host → device messages (what we receive):
     quota heartbeat from the BLE companion (scripts/quota_push.py):
         {"five_h_util":N, "week_util":N, "sonnet_util":N}  - utilization %
         (5-hour / 7-day-all / 7-day-Sonnet) from codexbar, plus matching
-        "*_color" RGB ints (host-resolved from the pace stage) for the bars
+        "*_color" RGB ints (host-resolved from the pace stage) for the bars,
+        and for 5h / Week "*_expected"+"*_expected_color" — the even-burn
+        baseline position and tick colour (CodexBar's expected-pace marker)
 
 Device → host messages (what we emit):
     {"ack":"status","name":..,"sec":true,"bat":{...},"sys":{...},"stats":{...}}
@@ -45,8 +47,12 @@ _HEARTBEAT_FIELDS = (
     # recognized as a heartbeat and reaches the UI, instead of falling
     # through to "unclassified". *_color are RGB ints (resolved host-side
     # from the codexbar pace stage) that the device paints as the bar fill.
+    # *_expected / *_expected_color (5h / Week only) position and colour the
+    # expected-pace tick — the even-burn baseline marker mirroring CodexBar.
     "five_h_util", "week_util", "sonnet_util",
     "five_h_color", "week_color", "sonnet_color",
+    "five_h_expected", "week_expected",
+    "five_h_expected_color", "week_expected_color",
 )
 
 # Unpair is destructive (wipes name/owner/stats and disconnects). The
