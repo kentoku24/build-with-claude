@@ -148,6 +148,10 @@ class BuddyUI:
         # the footer after _draw_main's fillRect wipes y=96..110.
         self._last_stats = {}
         self._last_battery = {}
+        # Cache last rendered footer strings to skip redraws when unchanged.
+        # Set to None when the footer area is wiped so the next draw is forced.
+        self._last_footer_left = None
+        self._last_footer_right = None
         _LCD.fillScreen(BLACK)
         # setFont is sticky across setTextSize calls, so we pick
         # DejaVu9 once at init. Wrapped in try/except so a future
@@ -347,6 +351,7 @@ class BuddyUI:
         ):
             _LCD.fillRect(0, 21, _W, 75, BLACK)  # y=21..95, footer spared
         else:
+            self._invalidate_footer()
             _LCD.fillRect(0, 21, _W, 90, BLACK)  # y=21..110, full clear
         # Overlays take precedence over the layout under them. The
         # unpair prompt outranks the passkey because they should never
@@ -496,9 +501,14 @@ class BuddyUI:
         if h_hint > 10:
             _LCD.setFont(_LCD.FONTS.DejaVu9)
 
+    def _invalidate_footer(self):
+        self._last_footer_left = None
+        self._last_footer_right = None
+
     def _draw_unpair_overlay(self):
         if not self._unpair_prompt:
             return
+        self._invalidate_footer()
         _LCD.fillRect(0, 21, _W, 90, BLACK)
         _LCD.setTextSize(1)
         _LCD.setTextColor(RED, BLACK)
@@ -515,6 +525,7 @@ class BuddyUI:
     def _draw_passkey_overlay(self):
         if self._passkey is None:
             return
+        self._invalidate_footer()
         _LCD.fillRect(0, 21, _W, 90, BLACK)
         _LCD.setTextSize(1)
         _LCD.setTextColor(ORANGE, BLACK)
@@ -533,23 +544,35 @@ class BuddyUI:
     def _draw_footer(self, stats: dict, battery: dict):
         # Thin stats line between main panel and hint strip, only in
         # the connected layout. y=96..110 (14 tall) holds one 10-px row.
-        _LCD.fillRect(0, 96, _W, 15, BLACK)
+        #
+        # Each side is redrawn independently and only when its string
+        # changes — avoids the black flash caused by fillRect+drawString
+        # on every periodic update when the values are stable.
+        # _invalidate_footer() resets the cache whenever a full-clear
+        # fillRect wipes this region so the next call forces a redraw.
         _LCD.setTextSize(1)
-        _LCD.setTextColor(GRAY_MID, BLACK)
         left = "Lv.{} a:{} d:{}".format(
             stats.get("lvl", 0),
             stats.get("appr", 0),
             stats.get("deny", 0),
         )
-        _LCD.drawString(left, 6, 98)
         pct = max(0, min(100, battery.get("pct", 0)))
-        label = "{}%".format(pct)
-        _LCD.setTextColor(CREAM, BLACK)
-        # Right-aligned with 6 px of padding — and critically,
-        # computed from textWidth, not a char-count estimate, so
-        # proportional-font surprises (e.g. '%' being 8 px wide)
-        # don't push the label off-screen and trigger a line wrap.
-        _LCD.drawString(label, _right(98, 6, label), 98)
+        right = "{}%".format(pct)
+
+        if left != self._last_footer_left:
+            _LCD.fillRect(0, 96, (_W * 2) // 3, 15, BLACK)
+            _LCD.setTextColor(GRAY_MID, BLACK)
+            _LCD.drawString(left, 6, 98)
+            self._last_footer_left = left
+
+        if right != self._last_footer_right:
+            _LCD.fillRect((_W * 2) // 3, 96, _W // 3 + 1, 15, BLACK)
+            _LCD.setTextColor(CREAM, BLACK)
+            # Right-aligned with 6 px of padding — computed from textWidth,
+            # not a char-count estimate, so proportional-font surprises
+            # (e.g. '%' being 8 px wide) don't push the label off-screen.
+            _LCD.drawString(right, _right(98, 6, right), 98)
+            self._last_footer_right = right
 
     def _redraw_chrome(self):
         _LCD.fillScreen(BLACK)
