@@ -64,6 +64,8 @@ to size 4 for cross-room readability.
     y=96       "type it into Claude"
 """
 
+import time
+
 import M5
 
 # Anthropic palette, inlined — byte-for-byte matches ui_theme.py.
@@ -83,6 +85,31 @@ _LCD = M5.Lcd
 
 _W = 240
 _H = 135
+
+# ---- quota-bar shimmer
+#
+# Each bar's filled portion stays solid (the host-sent pace colour); a soft
+# highlight band glides across it, rests, then repeats — a "glint" that signals
+# the link is live without the SPI cost of a full barber-pole repaint. tick_anim
+# is called every main-loop iteration but self-throttles to _GLINT_FRAME_MS, and
+# during the rest gap it short-circuits to nothing. The shine is three lighten
+# steps (edge / core / edge) across _GLINT_W px, clipped to the filled width so
+# it never paints over the gray remainder or a "--"/empty bar.
+#
+# Geometry mirrors _draw_bar exactly: bars start at x=6 and are _BAR_W wide.
+_BAR_W = _W - 12              # 228 — must match _draw_bar's bar_w
+_GLINT_W = 28                # highlight band width (px)
+_GLINT_STEP = 6              # band travel per frame (px)
+_GLINT_FRAME_MS = 50         # min ms between frames (~20 fps)
+_GLINT_REST_MS = 800         # pause between sweeps (ms)
+_GLINT_REVERSE = True        # True = right-to-left, nodding to example #6
+_GLINT_EDGE = 0.25           # lighten fraction for the band's soft edges
+_GLINT_CORE = 0.55           # lighten fraction for the band's bright core
+# Derived cycle counts (sweep frames + rest frames).
+_GLINT_TRAVEL = _BAR_W + _GLINT_W
+_GLINT_SWEEP_STEPS = _GLINT_TRAVEL // _GLINT_STEP + 1
+_GLINT_REST_FRAMES = _GLINT_REST_MS // _GLINT_FRAME_MS
+_GLINT_CYCLE = _GLINT_SWEEP_STEPS + _GLINT_REST_FRAMES
 
 # Usage bars render the *real* Claude quota, which only the host knows.
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
@@ -127,6 +154,22 @@ def _center(text: str) -> int:
     return (_W - _LCD.textWidth(text)) // 2
 
 
+def _lighten(color: int, f: float) -> int:
+    """Blend a 0xRRGGBB int toward white by fraction f (0..1).
+
+    The glint is a brighter shade of whatever pace colour the host sent for
+    that bar, so we derive it at draw time rather than hard-coding a palette.
+    M5GFX accepts 24-bit ints directly (it downsamples to RGB565 internally).
+    """
+    r = (color >> 16) & 0xFF
+    g = (color >> 8) & 0xFF
+    b = color & 0xFF
+    r = int(r + (255 - r) * f)
+    g = int(g + (255 - g) * f)
+    b = int(b + (255 - b) * f)
+    return (r << 16) | (g << 8) | b
+
+
 class BuddyUI:
     """240x135 view. Mirrors the Basic's BuddyUI API so the protocol
     and app layers don't care which display is underneath."""
@@ -148,6 +191,15 @@ class BuddyUI:
         # the footer after _draw_main's fillRect wipes y=96..110.
         self._last_stats = {}
         self._last_battery = {}
+        # Shimmer state. _anim_bars is rebuilt by _draw_data_rows with the
+        # geometry of the currently-visible quota bars; tick_anim sweeps a
+        # glint across them. _glint_phase walks the sweep+rest cycle;
+        # _glint_was_active lets the rest gap short-circuit after one cleanup
+        # frame so we don't keep repainting solid bars while nothing moves.
+        self._anim_bars = []
+        self._glint_phase = 0
+        self._last_glint_ms = 0
+        self._glint_was_active = False
         _LCD.fillScreen(BLACK)
         # setFont is sticky across setTextSize calls, so we pick
         # DejaVu9 once at init. Wrapped in try/except so a future
@@ -398,6 +450,9 @@ class BuddyUI:
         updates.  The percentage text area is always cleared to a fixed width
         before writing so variable-width strings ("9%" vs "100%") don't leave
         stale pixels from a previous wider value.
+
+        Returns (bar_y, fill_w) so _draw_data_rows can record the filled region
+        for tick_anim's glint to sweep across.
         """
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
@@ -422,6 +477,7 @@ class BuddyUI:
             _LCD.fillRect(6, bar_y, fill_w, 8, color)
         if fill_w < bar_w:
             _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
+        return bar_y, fill_w
 
     def _data_pcts(self):
         """Return (h5, wk, sonnet) remaining % (0..100), each None if unknown.
@@ -453,12 +509,25 @@ class BuddyUI:
         """
         hb = self._last
         h5, wk, snt = self._data_pcts()
-        self._draw_bar("5h", h5, 24, self._bar_color(hb.get("five_h_color")))
-        self._draw_bar("Week", wk, 48, self._bar_color(hb.get("week_color")))
+        bars = []
+        c5 = self._bar_color(hb.get("five_h_color"))
+        by, fw = self._draw_bar("5h", h5, 24, c5)
+        bars.append({"bar_y": by, "fill_w": fw, "color": c5})
+        cw = self._bar_color(hb.get("week_color"))
+        by, fw = self._draw_bar("Week", wk, 48, cw)
+        bars.append({"bar_y": by, "fill_w": fw, "color": cw})
         if self._prompt:
+            # The prompt box (y=74..108) takes the Sonnet row — don't animate
+            # a bar that isn't drawn. 5h/Week stay live above it.
             self._draw_prompt_box(self._prompt)
         else:
-            self._draw_bar("Sonnet", snt, 72, self._bar_color(hb.get("sonnet_color")))
+            cs = self._bar_color(hb.get("sonnet_color"))
+            by, fw = self._draw_bar("Sonnet", snt, 72, cs)
+            bars.append({"bar_y": by, "fill_w": fw, "color": cs})
+        # Replacing the list (vs mutating) means a fresh solid fill was just
+        # painted under every bar, so any in-flight glint is already gone and
+        # tick_anim restarts cleanly on its next frame.
+        self._anim_bars = bars
 
     def _draw_connected_main(self):
         self._draw_data_rows()
@@ -467,6 +536,77 @@ class BuddyUI:
         # (y=74..108) overlaps the footer band (y=96..110).
         if not self._prompt and (self._last_stats or self._last_battery):
             self._draw_footer(self._last_stats, self._last_battery)
+
+    def tick_anim(self):
+        """Advance the quota-bar glint. Called every main-loop iteration.
+
+        Cheap and self-gating: returns immediately unless we're in the
+        connected steady state (no passkey / unpair overlay), self-throttles
+        to _GLINT_FRAME_MS, and short-circuits during the rest gap after one
+        cleanup frame. Each active frame repaints each bar's solid fill (a
+        single fillRect) and draws the glint over it — never a black clear,
+        so no flicker, mirroring _draw_bar's single-pass discipline.
+        """
+        if (
+            self._connection_state in ("advertising", "disconnected")
+            or self._passkey is not None
+            or self._unpair_prompt
+            or not self._anim_bars
+        ):
+            return
+        now = time.ticks_ms()
+        if self._last_glint_ms and time.ticks_diff(now, self._last_glint_ms) < _GLINT_FRAME_MS:
+            return
+        self._last_glint_ms = now
+
+        phase = self._glint_phase % _GLINT_CYCLE
+        self._glint_phase += 1
+        active = phase < _GLINT_SWEEP_STEPS
+        if not active and not self._glint_was_active:
+            # Resting and the trailing glint was already cleared last frame —
+            # nothing to repaint, so spare the SPI bus until the next sweep.
+            return
+        self._glint_was_active = active
+
+        gx = None
+        if active:
+            travel = phase * _GLINT_STEP
+            if _GLINT_REVERSE:
+                gx = (6 + _BAR_W) - travel  # band enters from the right edge
+            else:
+                gx = (6 - _GLINT_W) + travel
+        for bar in self._anim_bars:
+            fw = bar["fill_w"]
+            if fw <= 0:
+                continue
+            # Repaint the solid fill (clears the previous frame's glint) then
+            # lay the new glint on top, both in the same pass.
+            _LCD.fillRect(6, bar["bar_y"], fw, 8, bar["color"])
+            if gx is not None:
+                self._draw_glint(bar, gx)
+
+    def _draw_glint(self, bar, gx):
+        """Paint the soft highlight band onto one bar's fill, clipped to it.
+
+        The band is three lighten steps across _GLINT_W px (edge / core / edge)
+        for a rounded sheen. Each segment is clipped to [6, 6+fill_w) so the
+        glint never spills onto the gray remainder.
+        """
+        x0 = 6
+        x1 = 6 + bar["fill_w"]
+        by = bar["bar_y"]
+        c_edge = _lighten(bar["color"], _GLINT_EDGE)
+        c_core = _lighten(bar["color"], _GLINT_CORE)
+        segs = (
+            (gx, gx + 8, c_edge),
+            (gx + 8, gx + 20, c_core),
+            (gx + 20, gx + _GLINT_W, c_edge),
+        )
+        for s, e, col in segs:
+            a = s if s > x0 else x0
+            b = e if e < x1 else x1
+            if b > a:
+                _LCD.fillRect(a, by, b - a, 8, col)
 
     def _draw_prompt_box(self, prompt: dict):
         # Orange-bordered box for the pending permission. y=74..109

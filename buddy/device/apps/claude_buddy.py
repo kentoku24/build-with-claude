@@ -353,6 +353,11 @@ def run():
                 ui.restore_button_hints()
                 last_toast_ms = 0
 
+            # Sweep the quota-bar glint. Self-throttled and a no-op outside the
+            # connected steady state, so it's safe to call unconditionally here
+            # in main-loop context (not a BLE callback — no SPI interleave risk).
+            ui.tick_anim()
+
             # 40 ms matches buddy_app.py — fast enough for responsive
             # key handling, slow enough that the BLE IRQ gets plenty
             # of room. MatrixKeyboard handles debounce internally on
