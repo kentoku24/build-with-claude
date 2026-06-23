@@ -79,21 +79,6 @@ CYAN = 0x00FFFF
 YELLOW = 0xFFFF00
 RED = 0xFF0000
 
-# Bar colour by codexbar pace `stage` (see buddy/references/codexbar pace
-# spec). The stage encodes consumption pace vs the even-burn baseline:
-# `*Behind` = under pace (reserve, safe), `onTrack` = on pace, `*Ahead` =
-# over pace (deficit, will run out early). We map the 7 fixed stages onto a
-# green->red ramp so a glance at the colour says "am I overspending?".
-_STAGE_COLORS = {
-    "farBehind":      0x00FF00,  # green  — deep reserve
-    "behind":         0x55FF00,
-    "slightlyBehind": 0xAAFF00,
-    "onTrack":        0xFFFF00,  # yellow — exactly on pace
-    "slightlyAhead":  0xFFAA00,
-    "ahead":          0xFF5500,
-    "farAhead":       0xFF0000,  # red    — heavy deficit
-}
-
 _LCD = M5.Lcd
 
 _W = 240
@@ -102,10 +87,14 @@ _H = 135
 # Usage bars render the *real* Claude quota, which only the host knows.
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
 # coexistence) so it can't query usage itself — the host companion
-# (scripts/quota_push.py, backed by `codexbar`) sends the figures in each
-# heartbeat as `five_h_util` / `week_util` / `sonnet_util`: utilization
-# percentages (0..100, "used") for the 5-hour, 7-day-all, and 7-day-Sonnet
-# windows. We draw *remaining* = 100 - utilization.
+# (scripts/quota_push.py, backed by `codexbar`) sends, per heartbeat:
+#   five_h_util / week_util / sonnet_util   - utilization % (0..100, "used")
+#                                             -> bar length = 100 - util
+#   five_h_color / week_color / sonnet_color - RGB int -> bar fill colour
+# The host derives the colour from the codexbar pace stage (and a
+# remaining-% fallback for windows with no pace); the device just paints
+# it. Keeping the stage->colour map host-side means colours can be retuned
+# without re-flashing.
 #
 # Claude.app's own heartbeat carries none of these, so on that link the
 # bars read "--". See buddy/references/protocol.md.
@@ -387,16 +376,14 @@ class BuddyUI:
         _LCD.drawString("Settings > Buddy", 6, 66)
         _LCD.drawString("and pick this one", 6, 84)
 
-    def _bar_color(self, pct, stage):
-        """Pick a bar colour. Prefer the codexbar pace `stage` (green=reserve
-        … red=deficit). Fall back to a remaining-% scale when no stage is
-        available — Sonnet has no pace, and codexbar omits pace early in a
-        window."""
-        if stage in _STAGE_COLORS:
-            return _STAGE_COLORS[stage]
-        if pct is None:
-            return GRAY_DIM  # no data; fill isn't drawn anyway
-        return GREEN if pct > 50 else (YELLOW if pct > 20 else RED)
+    def _bar_color(self, color):
+        """Bar fill colour. The host (scripts/quota_push.py) resolves the
+        codexbar pace stage — and the remaining-% fallback for windows with
+        no pace — into an RGB int and sends it per bar, so the device just
+        paints what it's told. GRAY_MID is only a defensive default for a
+        bar with data but no colour (shouldn't happen: the host always pairs
+        a colour with a util)."""
+        return GRAY_MID if color is None else color
 
     def _draw_bar(self, label: str, pct, y: int, color: int):
         """Draw a labeled horizontal progress bar showing remaining quota.
@@ -461,17 +448,17 @@ class BuddyUI:
         was dropped to make vertical room. A pending prompt occupies the
         Sonnet row's space (prompt box y=74..108), so we hide Sonnet then.
 
-        5h/Week colour by their codexbar pace stage; Sonnet has no pace so
-        it uses the remaining-% fallback.
+        Bar length is remaining quota; bar colour is whatever the host sent
+        (`*_color`, derived from the codexbar pace stage on the Mac side).
         """
         hb = self._last
         h5, wk, snt = self._data_pcts()
-        self._draw_bar("5h", h5, 24, self._bar_color(h5, hb.get("five_h_stage")))
-        self._draw_bar("Week", wk, 48, self._bar_color(wk, hb.get("week_stage")))
+        self._draw_bar("5h", h5, 24, self._bar_color(hb.get("five_h_color")))
+        self._draw_bar("Week", wk, 48, self._bar_color(hb.get("week_color")))
         if self._prompt:
             self._draw_prompt_box(self._prompt)
         else:
-            self._draw_bar("Sonnet", snt, 72, self._bar_color(snt, None))
+            self._draw_bar("Sonnet", snt, 72, self._bar_color(hb.get("sonnet_color")))
 
     def _draw_connected_main(self):
         self._draw_data_rows()

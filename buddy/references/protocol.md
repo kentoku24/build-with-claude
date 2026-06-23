@@ -103,11 +103,12 @@ on-device "5h / Week / Sonnet" bars are instead fed by a host companion,
 
 ```
 {
-  "five_h_util": N,      # codexbar usage.primary.usedPercent   (5-hour)
-  "week_util": N,        # codexbar usage.secondary.usedPercent (7-day, all)
-  "sonnet_util": N,      # codexbar usage.tertiary.usedPercent  (7-day, Sonnet)
-  "five_h_stage": "...", # codexbar pace.primary.stage   (optional; colours 5h)
-  "week_stage": "..."    # codexbar pace.secondary.stage (optional; colours Week)
+  "five_h_util": N,    # codexbar usage.primary.usedPercent   (5-hour)
+  "week_util": N,      # codexbar usage.secondary.usedPercent (7-day, all)
+  "sonnet_util": N,    # codexbar usage.tertiary.usedPercent  (7-day, Sonnet)
+  "five_h_color": C,   # RGB int (0xRRGGBB) for the 5h bar fill
+  "week_color": C,     # RGB int for the Week bar fill
+  "sonnet_color": C    # RGB int for the Sonnet bar fill
 }
 ```
 
@@ -118,14 +119,14 @@ codexbar mapping was verified against the labeled usage API
 `100 - util` for the **bar length**, and shows `--` for any field it
 hasn't received (e.g. on the Claude.app link, which sends none).
 
-The `*_stage` values are codexbar **pace stages** (one of `farBehind`,
-`behind`, `slightlyBehind`, `onTrack`, `slightlyAhead`, `ahead`,
-`farAhead`) and set the **bar colour** on a green→red ramp
-(`*Behind`/reserve = green … `*Ahead`/deficit = red). codexbar only
-computes pace for `primary`/`secondary`, so **Sonnet has no stage** and
-falls back to a remaining-% colour; the 5h/Week bars also fall back when
-codexbar omits pace (early in a window). All these names are in the
-device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
+The `*_color` values are **plain RGB ints the device paints directly** —
+no colour logic on the device. The companion resolves them host-side from
+the codexbar **pace stage** (`farBehind`…`farAhead`) on a green→red ramp
+(`*Behind`/reserve = green … `*Ahead`/deficit = red), with a remaining-%
+fallback where there's no stage (Sonnet always; 5h/Week when codexbar
+omits pace early in a window). Keeping the stage→colour map on the host
+means colours can be retuned without re-flashing the device. All these
+names are in the device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
 `buddy_protocol.py`) so a quota-only message is recognized as a heartbeat.
 
 **Connection model:** the companion is the BLE central, like Claude.app,

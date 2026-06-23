@@ -25,7 +25,7 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 The **5h / Week / Sonnet** bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `sonnet_util` heartbeats to the device, which renders `100 − utilization` for each.
 
-The **bar length** is remaining quota; the **bar colour** is the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). Sonnet has no pace, so it colours by remaining-%. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
+The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). Sonnet has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
 
 ### Show quota on the device — runbook
 
@@ -41,9 +41,9 @@ Preview the numbers any time without a device or Bluetooth:
 
 ```bash
 python3 buddy/scripts/quota_push.py --dry-run
-# 5h: 86% remaining (stage=farBehind)
-# Week: 87% remaining (stage=slightlyAhead)
-# Sonnet: 94% remaining (stage=n/a)
+# 5h    : 86% remaining  stage=farBehind     color=0x00FF00
+# Week  : 87% remaining  stage=slightlyAhead color=0xFFAA00
+# Sonnet: 94% remaining  stage=n/a           color=0x00FF00
 ```
 
 **Each time you want the bars live**
