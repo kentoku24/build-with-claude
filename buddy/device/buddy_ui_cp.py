@@ -92,24 +92,59 @@ _H = 135
 # highlight band glides across it, rests, then repeats — a "glint" that signals
 # the link is live without the SPI cost of a full barber-pole repaint. tick_anim
 # is called every main-loop iteration but self-throttles to _GLINT_FRAME_MS, and
-# during the rest gap it short-circuits to nothing. The shine is three lighten
-# steps (edge / core / edge) across _GLINT_W px, clipped to the filled width so
-# it never paints over the gray remainder or a "--"/empty bar.
+# during the rest gap it short-circuits to nothing.
+#
+# The shine is a smooth bell: the band is sliced into thin _GLINT_SLICE-px
+# columns whose lighten fraction follows a precomputed profile (_GLINT_PROFILE)
+# — brightest at the centre, fading quadratically to the edges. The whole band
+# is clipped to the filled width so it never paints over the gray remainder or
+# a "--"/empty bar. Speed is _GLINT_STEP px per frame: the LCD can't sustain a
+# high frame rate, so we move *fewer pixels per frame* (small step) rather than
+# leaning on fps for a slow, smooth glide.
 #
 # Geometry mirrors _draw_bar exactly: bars start at x=6 and are _BAR_W wide.
-_BAR_W = _W - 12              # 228 — must match _draw_bar's bar_w
-_GLINT_W = 28                # highlight band width (px)
-_GLINT_STEP = 6              # band travel per frame (px)
-_GLINT_FRAME_MS = 50         # min ms between frames (~20 fps)
+_BAR_W = _W - 12             # 228 — must match _draw_bar's bar_w
+_GLINT_W = 40                # highlight band width (px) — wider = gentler ramp
+_GLINT_SLICE = 2             # band drawn as slices this wide (smaller = finer)
+_GLINT_STEP = 3              # band travel per frame (px) — smaller = slower glide
+_GLINT_FRAME_MS = 50         # min ms between frames (~20 fps; LCD-bound ceiling)
 _GLINT_REST_MS = 800         # pause between sweeps (ms)
 _GLINT_REVERSE = True        # True = right-to-left, nodding to example #6
-_GLINT_EDGE = 0.25           # lighten fraction for the band's soft edges
-_GLINT_CORE = 0.55           # lighten fraction for the band's bright core
+_GLINT_CORE = 0.6            # peak lighten fraction at the band's centre
 # Derived cycle counts (sweep frames + rest frames).
 _GLINT_TRAVEL = _BAR_W + _GLINT_W
 _GLINT_SWEEP_STEPS = _GLINT_TRAVEL // _GLINT_STEP + 1
 _GLINT_REST_FRAMES = _GLINT_REST_MS // _GLINT_FRAME_MS
 _GLINT_CYCLE = _GLINT_SWEEP_STEPS + _GLINT_REST_FRAMES
+
+
+def _build_glint_profile(width, slice_w, core):
+    """Precompute the glint's brightness ramp once at import.
+
+    Returns a list of (offset_px, slice_width_px, lighten_frac) covering the
+    band left-to-right. Brightness is a quadratic bell (1 - d^2, where d is the
+    distance from the centre normalised to the half-width), so the highlight is
+    brightest in the middle and fades smoothly out. Near-zero edge slices are
+    dropped — they'd lighten the base colour imperceptibly while still costing a
+    fillRect. Pure arithmetic (no `math`) so it works on stripped MicroPython
+    builds.
+    """
+    prof = []
+    half = width / 2.0
+    off = 0
+    while off < width:
+        w = slice_w if off + slice_w <= width else (width - off)
+        d = abs((off + w / 2.0) - half) / half
+        if d > 1.0:
+            d = 1.0
+        frac = core * (1.0 - d * d)
+        if frac >= 0.05:
+            prof.append((off, w, frac))
+        off += slice_w
+    return prof
+
+
+_GLINT_PROFILE = _build_glint_profile(_GLINT_W, _GLINT_SLICE, _GLINT_CORE)
 
 # Usage bars render the *real* Claude quota, which only the host knows.
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
@@ -588,25 +623,23 @@ class BuddyUI:
     def _draw_glint(self, bar, gx):
         """Paint the soft highlight band onto one bar's fill, clipped to it.
 
-        The band is three lighten steps across _GLINT_W px (edge / core / edge)
-        for a rounded sheen. Each segment is clipped to [6, 6+fill_w) so the
-        glint never spills onto the gray remainder.
+        Walks the precomputed _GLINT_PROFILE (thin slices with a centre-bright
+        quadratic falloff) and lightens the bar's base colour per slice, so the
+        sheen is a smooth gradient rather than a few hard steps. Each slice is
+        clipped to [6, 6+fill_w) so the glint never spills onto the gray
+        remainder.
         """
         x0 = 6
         x1 = 6 + bar["fill_w"]
         by = bar["bar_y"]
-        c_edge = _lighten(bar["color"], _GLINT_EDGE)
-        c_core = _lighten(bar["color"], _GLINT_CORE)
-        segs = (
-            (gx, gx + 8, c_edge),
-            (gx + 8, gx + 20, c_core),
-            (gx + 20, gx + _GLINT_W, c_edge),
-        )
-        for s, e, col in segs:
+        base = bar["color"]
+        for off, w, frac in _GLINT_PROFILE:
+            s = gx + off
+            e = s + w
             a = s if s > x0 else x0
             b = e if e < x1 else x1
             if b > a:
-                _LCD.fillRect(a, by, b - a, 8, col)
+                _LCD.fillRect(a, by, b - a, 8, _lighten(base, frac))
 
     def _draw_prompt_box(self, prompt: dict):
         # Orange-bordered box for the pending permission. y=74..109
