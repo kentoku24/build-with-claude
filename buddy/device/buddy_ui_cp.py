@@ -81,6 +81,17 @@ CYAN = 0x00FFFF
 YELLOW = 0xFFFF00
 RED = 0xFF0000
 
+# Battery voltage-trend colouring for the "{pct}%" footer segment. The
+# Cardputer is a plain-ADC board, so isCharging()/getBatteryCurrent() are
+# non-functional (M5Unified returns constants); voltage is the only live
+# battery signal. We compare it to a reference sampled _BATT_TREND_MS ago:
+# a rise of at least _BATT_TREND_MV ⇒ charging (ORANGE), an equal fall ⇒
+# draining (GREEN), neither ⇒ steady (WHITE). The deadband sits above the
+# ~±8 mV ADC jitter so a flat battery stays white instead of flickering;
+# a ~20 s response is plenty for a battery gauge.
+_BATT_TREND_MS = 20000
+_BATT_TREND_MV = 10
+
 _LCD = M5.Lcd
 
 _W = 240
@@ -231,6 +242,11 @@ class BuddyUI:
         # the footer after _draw_main's fillRect wipes y=96..110.
         self._last_stats = {}
         self._last_battery = {}
+        # Voltage-trend colour state for the battery "{pct}%" footer
+        # segment (see _update_batt_trend).
+        self._batt_mv_ref = None
+        self._batt_mv_ref_ms = 0
+        self._batt_pct_color = WHITE
         # Shimmer state. _anim_bars is rebuilt by _draw_data_rows with the
         # geometry of the currently-visible quota bars; tick_anim sweeps a
         # glint across them. _glint_phase walks the sweep+rest cycle;
@@ -326,9 +342,38 @@ class BuddyUI:
     def update_footer(self, stats: dict, battery: dict):
         self._last_stats = stats
         self._last_battery = battery
+        # Recompute the trend colour here, on a fresh reading — not in
+        # _draw_footer, which also runs on cache-restore repaints.
+        self._update_batt_trend(battery)
         # Stats footer only appears during the connected layout.
         if self._connection_state not in ("advertising", "disconnected"):
             self._draw_footer(stats, battery)
+
+    def _update_batt_trend(self, battery: dict):
+        """Set the {pct}% colour from the battery-voltage trend.
+
+        ORANGE = rising (charging), GREEN = falling (draining), WHITE =
+        steady. Compares the current voltage against a reference sampled
+        at least _BATT_TREND_MS ago, with a _BATT_TREND_MV deadband; the
+        colour is held between updates so it never flickers.
+        """
+        mv = battery.get("mV", 0)
+        now = time.ticks_ms()
+        if self._batt_mv_ref is None:
+            self._batt_mv_ref = mv
+            self._batt_mv_ref_ms = now
+            return
+        if time.ticks_diff(now, self._batt_mv_ref_ms) < _BATT_TREND_MS:
+            return
+        delta = mv - self._batt_mv_ref
+        if delta >= _BATT_TREND_MV:
+            self._batt_pct_color = ORANGE
+        elif delta <= -_BATT_TREND_MV:
+            self._batt_pct_color = GREEN
+        else:
+            self._batt_pct_color = WHITE
+        self._batt_mv_ref = mv
+        self._batt_mv_ref_ms = now
 
     def flash_decision(self, decision: str):
         color = GREEN if decision == "once" else RED
@@ -801,13 +846,20 @@ class BuddyUI:
         )
         _LCD.drawString(left, 6, 98)
         pct = max(0, min(100, battery.get("pct", 0)))
-        label = "{}%".format(pct)
+        # e.g. "0mA 3950mV 87%" — current (always 0; the Cardputer has no
+        # current sensor) and voltage in CREAM, then the level.
+        prefix = "{}mA {}mV ".format(battery.get("mA", 0), battery.get("mV", 0))
+        pct_str = "{}%".format(pct)
+        # Right-align the whole string as a unit — width from textWidth,
+        # not a char-count estimate, so proportional-font surprises (e.g.
+        # '%' being 8 px wide) don't push it off-screen and wrap.
+        start_x = _right(98, 6, prefix + pct_str)
         _LCD.setTextColor(CREAM, BLACK)
-        # Right-aligned with 6 px of padding — and critically,
-        # computed from textWidth, not a char-count estimate, so
-        # proportional-font surprises (e.g. '%' being 8 px wide)
-        # don't push the label off-screen and trigger a line wrap.
-        _LCD.drawString(label, _right(98, 6, label), 98)
+        _LCD.drawString(prefix, start_x, 98)
+        # Level colour tracks the voltage trend: ORANGE rising (charging),
+        # GREEN falling (draining), WHITE steady.
+        _LCD.setTextColor(self._batt_pct_color, BLACK)
+        _LCD.drawString(pct_str, start_x + _LCD.textWidth(prefix), 98)
 
     def _redraw_chrome(self):
         _LCD.fillScreen(BLACK)
