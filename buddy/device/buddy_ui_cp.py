@@ -574,6 +574,15 @@ class BuddyUI:
         """
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
+        # The 3rd bar's label is host-supplied (bar3_label) and arbitrary, so
+        # defend like _draw_prompt_box does for host text: coerce to str (a
+        # malformed numeric label would otherwise hit drawString) and truncate
+        # to the label area — x=6 up to the pct slot at _W-38, with a small gap
+        # — so a long name can't overrun the bar or collide with the right-
+        # aligned pct. Fixed "5h"/"Week" labels never reach the loop.
+        label = str(label)
+        while _LCD.textWidth(label) > _W - 46 and len(label) > 1:
+            label = label[:-1]
         _LCD.drawString(label, 6, y)
         # Clear a 36 px slot at the right edge for the pct label so that
         # a shorter string ("9%" / "--") always overwrites a longer one ("100%").

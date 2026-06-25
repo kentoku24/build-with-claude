@@ -23,9 +23,10 @@ sending its title as the bar's name and its usedPercent as the value:
     extraRateWindows[*] -> bar3_label + bar3_util + bar3_color
 
 `--bar3-id` picks which extra window by id, `--bar3-label` overrides the
-displayed name, and `--bar3-value N` forces a static value decoupled from
-codexbar (a truly arbitrary bar). Older codexbar builds with a Sonnet
-`usage.tertiary` window are used as a last-resort fallback.
+displayed name, and `--bar3-value N` forces a static value for the bar,
+independent of codexbar's *data* (codexbar is still queried for the 5h/Week
+bars, so it must be installed either way). Older codexbar builds with a
+Sonnet `usage.tertiary` window are used as a last-resort fallback.
 
 The full codexbar response shape (usage + pace, stage enum, guards) is
 documented in buddy/references/codexbar-pace.md — pace only exists in
@@ -155,13 +156,19 @@ def _line_color_for(stage):
     return None
 
 
+# Remembers --bar3-id values we've already warned about, so a persistent
+# misconfiguration warns once per process instead of every push cycle.
+_warned_bar3_ids = set()
+
+
 def _resolve_bar3(usage, bar3_id=None, bar3_label=None, bar3_value=None):
     """Resolve the configurable 3rd bar to (label, used%|None) or None.
 
     The 3rd bar is generic — any (name, value). Resolution order:
 
-      1. `bar3_value` set  -> a static, fully arbitrary bar (label + value),
-         decoupled from codexbar. Pair it with --bar3-label for a name.
+      1. `bar3_value` set  -> a static value for the bar, independent of
+         codexbar's *data* (codexbar is still queried for the 5h/Week bars).
+         Pair it with --bar3-label for a name.
       2. a codexbar *extra-rate window* (`usage.extraRateWindows`) -> the one
          whose id == `bar3_id`, else the first. This is the default and is
          where "Daily Routines" lives (it replaced the Sonnet window in the
@@ -178,15 +185,27 @@ def _resolve_bar3(usage, bar3_id=None, bar3_label=None, bar3_value=None):
 
     extra = usage.get("extraRateWindows") or []
     chosen = None
-    if extra:
-        if bar3_id is not None:
-            chosen = next((w for w in extra if w.get("id") == bar3_id), None)
-        else:
-            chosen = extra[0]
+    if bar3_id is not None:
+        # An explicit id either matches a window or it doesn't — we never
+        # silently substitute extra[0] for a typo'd id. A miss warns once
+        # (it'd otherwise repeat every push cycle) and falls through below.
+        chosen = next((w for w in extra if w.get("id") == bar3_id), None)
+        if chosen is None and bar3_id not in _warned_bar3_ids:
+            _warned_bar3_ids.add(bar3_id)
+            ids = ", ".join(w.get("id", "?") for w in extra) or "(none available)"
+            print("quota_push: --bar3-id %r not in codexbar extra windows [%s]; "
+                  "falling back to tertiary/none" % (bar3_id, ids),
+                  file=sys.stderr)
+    elif extra:
+        chosen = extra[0]
     if chosen is not None:
         win = chosen.get("window") or {}
         up = win.get("usedPercent")
         label = bar3_label or chosen.get("title") or chosen.get("id") or "Bar 3"
+        # An explicitly/auto-chosen window with no usedPercent returns
+        # (label, None) rather than falling through to tertiary: keep the
+        # chosen bar's identity and let the device show "--", instead of
+        # silently relabelling the bar "Sonnet".
         return (label, None if up is None else int(round(up)))
 
     tert = (usage.get("tertiary") or {}).get("usedPercent")
@@ -358,7 +377,8 @@ def main(argv=None):
                     help="override the 3rd bar's displayed name (arbitrary)")
     ap.add_argument("--bar3-value", type=int, default=None,
                     help="force a static 0..100 value for the 3rd bar, "
-                         "decoupled from codexbar (pair with --bar3-label)")
+                         "independent of codexbar's data (codexbar is still "
+                         "queried for 5h/Week; pair with --bar3-label)")
     args = ap.parse_args(argv)
 
     if args.dry_run:
@@ -376,17 +396,19 @@ def main(argv=None):
                     expected, "n/a" if lc is None else "0x%06X" % lc)
             print("%-14s: %s remaining  stage=%-13s color=%s  expected=%s" % (
                 label, rem, stage or "n/a", color_s, exp_s))
+        # Mirror fetch_quota exactly: a 3rd bar with no value is *not* pushed,
+        # so report it as "not pushed" rather than printing a phantom row the
+        # device would never receive.
         bar3 = raw.get("bar3")
-        if bar3 is None:
-            print("%-14s: -- (no source; codexbar has no extra window/tertiary)"
-                  % "3rd bar")
+        b_util = None if bar3 is None else bar3[1]
+        if b_util is None:
+            why = "no source" if bar3 is None else "%r has no value" % bar3[0]
+            print("%-14s: -- (not pushed; %s)" % ("3rd bar", why))
         else:
-            b_label, b_util = bar3
-            rem = "--" if b_util is None else "%d%%" % (100 - b_util)
             color = _color_for(b_util, None)
             color_s = "n/a" if color is None else "0x%06X" % color
-            print("%-14s: %s remaining  stage=%-13s color=%s  expected=%s" % (
-                b_label, rem, "n/a", color_s, "--"))
+            print("%-14s: %d%% remaining  stage=%-13s color=%s  expected=%s" % (
+                bar3[0], 100 - b_util, "n/a", color_s, "--"))
         return 0
 
     try:
