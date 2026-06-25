@@ -57,12 +57,21 @@ Returns a JSON **array**; we read element `[0]`. Each entry:
 |---|---|---|---|---|
 | `usage.primary`   | 5-hour (300 min)     | `five_hour.utilization`        | `five_h_util`  | **5h** |
 | `usage.secondary` | 7-day, all (10080)   | `seven_day.utilization`        | `week_util`    | **Week** |
-| `usage.tertiary`  | 7-day, Sonnet (10080)| `seven_day_sonnet.utilization` | `sonnet_util`  | **Sonnet** |
+| `usage.extraRateWindows[*]` | varies (e.g. Daily Routines) | — | `bar3_util` + `bar3_label` | **3rd (generic)** |
+| `usage.tertiary`  | 7-day, Sonnet (10080)| `seven_day_sonnet.utilization` | `bar3_util` (fallback) | **3rd (generic)** |
 
 Verification: a simultaneous `codexbar` + `oauth/usage` snapshot matched
 `primary↔five_hour`, `secondary↔seven_day`, `tertiary↔seven_day_sonnet`
 to the percent. (On this account `seven_day_opus` is null, so `tertiary`
-is Sonnet — could differ for accounts that use Opus.)
+was Sonnet — could differ for accounts that use Opus.)
+
+**The 3rd buddy bar is generic.** It used to be hard-wired to `tertiary`
+(Sonnet), but that window left the codexbar GUI in favour of an
+**extra-rate window** ("Daily Routines"). `quota_push.py` now sources the
+3rd bar from `usage.extraRateWindows` by default (sending its `title` as
+`bar3_label` and `window.usedPercent` as `bar3_util`), falling back to
+`usage.tertiary` only when no extra window exists. `--bar3-id` /
+`--bar3-label` / `--bar3-value` override the source, name, and value.
 
 ---
 
@@ -79,8 +88,9 @@ you spent the window evenly over elapsed time).
 }
 ```
 
-> **Only `primary` and `secondary` ever carry pace. `tertiary` (Sonnet) never does.**
-> The buddy therefore colours Sonnet by a remaining-% fallback, not pace.
+> **Only `primary` and `secondary` ever carry pace.** `tertiary` and the
+> `extraRateWindows` never do.
+> The buddy therefore colours its generic 3rd bar by a remaining-% fallback, not pace.
 
 ### Per-window fields
 
@@ -196,14 +206,15 @@ Note: `pace` has no `tertiary`; `primary.willLastToReset=true` so its
 
 ## How `quota_push.py` consumes this
 
-| device bar | length from | colour from |
-|---|---|---|
-| 5h     | `usage.primary.usedPercent`   | `pace.primary.stage`   → `_STAGE_COLORS` |
-| Week   | `usage.secondary.usedPercent` | `pace.secondary.stage` → `_STAGE_COLORS` |
-| Sonnet | `usage.tertiary.usedPercent`  | **no pace** → remaining-% fallback |
+| device bar | name from | length from | colour from |
+|---|---|---|---|
+| 5h     | (fixed)                  | `usage.primary.usedPercent`   | `pace.primary.stage`   → `_STAGE_COLORS` |
+| Week   | (fixed)                  | `usage.secondary.usedPercent` | `pace.secondary.stage` → `_STAGE_COLORS` |
+| 3rd    | `extraRateWindows[*].title` (default) | `extraRateWindows[*].window.usedPercent` (default) | **no pace** → remaining-% fallback |
 
 The host resolves stage→RGB (`_STAGE_COLORS`, green=reserve … red=deficit)
-and a remaining-% fallback for any window with no stage (Sonnet always, or
-the 5h/Week windows when a Guard above suppressed pace), then sends
-`<name>_util` + `<name>_color` per heartbeat. See
+and a remaining-% fallback for any window with no stage (the 3rd bar always,
+or the 5h/Week windows when a Guard above suppressed pace), then sends
+`<name>_util` + `<name>_color` per heartbeat — plus `bar3_label` for the 3rd
+bar's name. See
 [protocol.md](protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
