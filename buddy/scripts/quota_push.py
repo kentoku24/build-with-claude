@@ -1,6 +1,6 @@
 """Push real Claude usage quota to the Cardputer buddy over BLE.
 
-The buddy's "5h / Week / Sonnet" bars need real quota figures, but the
+The buddy's "5h / Week / 3rd" bars need real quota figures, but the
 device is BLE-only and Claude.app's Hardware Buddy heartbeat carries no
 quota (see buddy/references/protocol.md). This companion fills that gap:
 it reads the quota from **codexbar** and writes, per heartbeat, a bar
@@ -8,26 +8,37 @@ length and a bar colour for each window to the device's Nordic-UART RX
 characteristic, so the bars track the real account quota.
 
 Backend: `codexbar --provider anthropic --format json`. Its first array
-entry has `usage.{primary, secondary, tertiary}.usedPercent` (the bar
-length) and `pace.{primary, secondary}.stage` (which we turn into a
-colour here, host-side):
+entry has `usage.{primary, secondary}.usedPercent` (the bar length) and
+`pace.{primary, secondary}.stage` (which we turn into a colour here,
+host-side):
 
     primary   -> five_h_util + five_h_color  (5-hour window)
     secondary -> week_util   + week_color    (7-day, all)
-    tertiary  -> sonnet_util + sonnet_color  (7-day, Sonnet; NO pace)
+
+The **3rd bar is a generic (name, value) slot** — not a fixed window.
+By default it tracks a codexbar *extra-rate window* (`usage.extraRateWindows`,
+e.g. "Daily Routines", which replaced the old Sonnet window in the GUI),
+sending its title as the bar's name and its usedPercent as the value:
+
+    extraRateWindows[*] -> bar3_label + bar3_util + bar3_color
+
+`--bar3-id` picks which extra window by id, `--bar3-label` overrides the
+displayed name, and `--bar3-value N` forces a static value decoupled from
+codexbar (a truly arbitrary bar). Older codexbar builds with a Sonnet
+`usage.tertiary` window are used as a last-resort fallback.
 
 The full codexbar response shape (usage + pace, stage enum, guards) is
 documented in buddy/references/codexbar-pace.md — pace only exists in
 steipete/CodexBar#1722, so that file is our record of what we parse here.
 
 (Mapping verified against the labeled usage API: primary==five_hour,
-secondary==seven_day, tertiary==seven_day_sonnet.) `<name>_util` gives
-the device its bar length (*remaining* = 100 - util). `<name>_color` is
-an RGB int the device paints directly — resolved here from the codexbar
-pace stage via `_STAGE_COLORS` (green=reserve … red=deficit), with a
-remaining-% fallback where there's no stage (Sonnet, or a window too
-early for codexbar to emit pace). Keeping the colour map in this script
-means you can retune colours without re-flashing the device.
+secondary==seven_day.) `<name>_util` gives the device its bar length
+(*remaining* = 100 - util). `<name>_color` is an RGB int the device
+paints directly — resolved here from the codexbar pace stage via
+`_STAGE_COLORS` (green=reserve … red=deficit), with a remaining-%
+fallback where there's no stage (the 3rd bar, or a window too early for
+codexbar to emit pace). Keeping the colour map in this script means you
+can retune colours without re-flashing the device.
 
 For the 5h / Week windows we additionally send the even-burn baseline so
 the device can draw CodexBar's expected-pace marker — a small tick on the
@@ -41,7 +52,7 @@ at on an even burn). `<name>_expected_color` is the tick colour, resolved
 here from the stage sign: green when behind the baseline (in reserve),
 red when ahead (in deficit), yellow when on pace. Both keys are omitted
 when codexbar emits no pace for that window (see the Guards in
-codexbar-pace.md). Sonnet (tertiary) never carries pace -> no tick.
+codexbar-pace.md). The generic 3rd bar carries no pace -> no tick.
 
 ### Connection model (important)
 
@@ -63,6 +74,9 @@ reconnect from Claude.app for the approval workflow.
     python quota_push.py --address <UUID> # skip the scan, connect directly
     python quota_push.py --once           # connect, push one sample, exit
     python quota_push.py --dry-run        # fetch+print quota only, no BLE
+    python quota_push.py --bar3-id claude-routines   # pick the 3rd-bar extra window
+    python quota_push.py --bar3-label Routines       # rename the 3rd bar
+    python quota_push.py --bar3-label Focus --bar3-value 42  # static arbitrary bar
 
 Run it from **Terminal.app**, not from inside another app's shell —
 macOS Bluetooth permission is per-binary, so an indirectly-launched
@@ -109,8 +123,8 @@ _STAGE_COLORS = {
 
 def _color_for(util, stage):
     """Resolve a bar colour (RGB int) or None. Prefer the pace stage; else
-    a remaining-% scale (Sonnet has no pace, and codexbar omits pace early
-    in a window). None only when there's no utilization at all."""
+    a remaining-% scale (the 3rd bar has no pace, and codexbar omits pace
+    early in a window). None only when there's no utilization at all."""
     if stage in _STAGE_COLORS:
         return _STAGE_COLORS[stage]
     if util is None:
@@ -141,11 +155,55 @@ def _line_color_for(stage):
     return None
 
 
-def _read_codexbar():
-    """Run codexbar and return {name: (used%|None, stage|None, expected%|None)}
-    for the five_h / week / sonnet windows (primary / secondary / tertiary).
-    `expected` is pace.<window>.expectedUsedPercent — the even-burn baseline
-    the device marks with a tick (None when codexbar emits no pace)."""
+def _resolve_bar3(usage, bar3_id=None, bar3_label=None, bar3_value=None):
+    """Resolve the configurable 3rd bar to (label, used%|None) or None.
+
+    The 3rd bar is generic — any (name, value). Resolution order:
+
+      1. `bar3_value` set  -> a static, fully arbitrary bar (label + value),
+         decoupled from codexbar. Pair it with --bar3-label for a name.
+      2. a codexbar *extra-rate window* (`usage.extraRateWindows`) -> the one
+         whose id == `bar3_id`, else the first. This is the default and is
+         where "Daily Routines" lives (it replaced the Sonnet window in the
+         GUI). Label = its title; value = its window.usedPercent.
+      3. legacy `usage.tertiary` (Sonnet) -> last-resort fallback for older
+         codexbar builds that still expose it.
+
+    `bar3_label`, when given, always overrides the displayed name. Returns
+    None when no source yields a value (the device then shows the 3rd bar
+    as "--").
+    """
+    if bar3_value is not None:
+        return (bar3_label or "Bar 3", max(0, min(100, int(bar3_value))))
+
+    extra = usage.get("extraRateWindows") or []
+    chosen = None
+    if extra:
+        if bar3_id is not None:
+            chosen = next((w for w in extra if w.get("id") == bar3_id), None)
+        else:
+            chosen = extra[0]
+    if chosen is not None:
+        win = chosen.get("window") or {}
+        up = win.get("usedPercent")
+        label = bar3_label or chosen.get("title") or chosen.get("id") or "Bar 3"
+        return (label, None if up is None else int(round(up)))
+
+    tert = (usage.get("tertiary") or {}).get("usedPercent")
+    if tert is not None:
+        return (bar3_label or "Sonnet", int(round(tert)))
+
+    return None
+
+
+def _read_codexbar(bar3_id=None, bar3_label=None, bar3_value=None):
+    """Run codexbar and return a dict of the three bars.
+
+    `five_h` / `week` -> (used%|None, stage|None, expected%|None) for the
+    primary / secondary windows; `expected` is pace.<window>.expectedUsedPercent,
+    the even-burn baseline the device marks with a tick (None when codexbar
+    emits no pace). `bar3` -> (label, used%|None) or None for the generic 3rd
+    bar (see _resolve_bar3 for how its source is chosen)."""
     try:
         out = subprocess.run(
             CODEXBAR_CMD, capture_output=True, text=True, check=True, timeout=20,
@@ -182,11 +240,11 @@ def _read_codexbar():
     return {
         "five_h": (used("primary"), stage("primary"), expected("primary")),
         "week": (used("secondary"), stage("secondary"), expected("secondary")),
-        "sonnet": (used("tertiary"), None, None),  # tertiary (Sonnet) has no pace
+        "bar3": _resolve_bar3(usage, bar3_id, bar3_label, bar3_value),
     }
 
 
-def fetch_quota():
+def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None):
     """Build the heartbeat dict: per window, `<name>_util` (bar length =
     100-util) and `<name>_color` (RGB int the device paints directly).
     Colour resolution happens here, host-side, so it's tunable without a
@@ -195,12 +253,18 @@ def fetch_quota():
     For 5h / Week, also `<name>_expected` (the even-burn baseline %) and
     `<name>_expected_color` (the tick colour) when codexbar emits pace.
 
+    The generic 3rd bar adds `bar3_label` (its arbitrary name) alongside
+    `bar3_util` / `bar3_color`; it carries no pace, so no expected tick.
+
     e.g. {"five_h_util": 14, "five_h_color": 65280, "five_h_expected": 27,
           "five_h_expected_color": 65280, "week_util": 13,
-          "week_color": 16755200, "sonnet_util": 6, "sonnet_color": 65280}
+          "week_color": 16755200, "bar3_label": "Daily Routines",
+          "bar3_util": 0, "bar3_color": 65280}
     """
+    raw = _read_codexbar(bar3_id, bar3_label, bar3_value)
     hb = {}
-    for name, (util, stage, expected) in _read_codexbar().items():
+    for name in ("five_h", "week"):
+        util, stage, expected = raw[name]
         if util is None:
             continue
         hb[name + "_util"] = util
@@ -208,12 +272,23 @@ def fetch_quota():
         if color is not None:
             hb[name + "_color"] = color
         # Expected-pace tick: only when codexbar gave us a baseline and a
-        # classifiable stage (5h / Week; Sonnet has no pace).
+        # classifiable stage (5h / Week only).
         if expected is not None:
             line_color = _line_color_for(stage)
             if line_color is not None:
                 hb[name + "_expected"] = expected
                 hb[name + "_expected_color"] = line_color
+    # The generic 3rd bar: a host-named (label, value) slot with no pace, so
+    # its colour uses the remaining-% fallback (_color_for with stage=None).
+    bar3 = raw.get("bar3")
+    if bar3 is not None:
+        label, util = bar3
+        if util is not None:
+            hb["bar3_label"] = label
+            hb["bar3_util"] = util
+            color = _color_for(util, None)
+            if color is not None:
+                hb["bar3_color"] = color
     return hb
 
 
@@ -231,7 +306,8 @@ async def _find_device(name_prefix: str, timeout: float = 8.0):
     return None
 
 
-async def _run(address, name_prefix, interval, once):
+async def _run(address, name_prefix, interval, once,
+               bar3_id=None, bar3_label=None, bar3_value=None):
     from bleak import BleakClient
 
     target = address
@@ -250,7 +326,7 @@ async def _run(address, name_prefix, interval, once):
         print("connected; pushing quota every %ds (Ctrl-C to stop)" % interval)
         while True:
             try:
-                hb = fetch_quota()
+                hb = fetch_quota(bar3_id, bar3_label, bar3_value)
                 await client.write_gatt_char(NUS_RX_UUID, _heartbeat_line(hb), response=False)
                 print("pushed %s" % hb)
             except Exception as e:  # keep the link up across transient errors
@@ -275,11 +351,19 @@ def main(argv=None):
                     help="push a single sample then exit (smoke test)")
     ap.add_argument("--dry-run", action="store_true",
                     help="fetch and print quota only; no BLE")
+    ap.add_argument("--bar3-id", default=None,
+                    help="codexbar extraRateWindows id for the 3rd bar "
+                         "(default: first extra window, e.g. Daily Routines)")
+    ap.add_argument("--bar3-label", default=None,
+                    help="override the 3rd bar's displayed name (arbitrary)")
+    ap.add_argument("--bar3-value", type=int, default=None,
+                    help="force a static 0..100 value for the 3rd bar, "
+                         "decoupled from codexbar (pair with --bar3-label)")
     args = ap.parse_args(argv)
 
     if args.dry_run:
-        raw = _read_codexbar()
-        for name, label in (("five_h", "5h"), ("week", "Week"), ("sonnet", "Sonnet")):
+        raw = _read_codexbar(args.bar3_id, args.bar3_label, args.bar3_value)
+        for name, label in (("five_h", "5h"), ("week", "Week")):
             util, stage, expected = raw[name]
             rem = "--" if util is None else "%d%%" % (100 - util)
             color = _color_for(util, stage)
@@ -290,12 +374,24 @@ def main(argv=None):
                 lc = _line_color_for(stage)
                 exp_s = "%d%% (%s)" % (
                     expected, "n/a" if lc is None else "0x%06X" % lc)
-            print("%-6s: %s remaining  stage=%-13s color=%s  expected=%s" % (
+            print("%-14s: %s remaining  stage=%-13s color=%s  expected=%s" % (
                 label, rem, stage or "n/a", color_s, exp_s))
+        bar3 = raw.get("bar3")
+        if bar3 is None:
+            print("%-14s: -- (no source; codexbar has no extra window/tertiary)"
+                  % "3rd bar")
+        else:
+            b_label, b_util = bar3
+            rem = "--" if b_util is None else "%d%%" % (100 - b_util)
+            color = _color_for(b_util, None)
+            color_s = "n/a" if color is None else "0x%06X" % color
+            print("%-14s: %s remaining  stage=%-13s color=%s  expected=%s" % (
+                b_label, rem, "n/a", color_s, "--"))
         return 0
 
     try:
-        asyncio.run(_run(args.address, args.name_prefix, args.interval, args.once))
+        asyncio.run(_run(args.address, args.name_prefix, args.interval, args.once,
+                         args.bar3_id, args.bar3_label, args.bar3_value))
     except KeyboardInterrupt:
         print("\nstopped")
     except ImportError:

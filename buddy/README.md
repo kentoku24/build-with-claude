@@ -23,9 +23,17 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 ## Quota bars (BLE companion)
 
-The **5h / Week / Sonnet** bars show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `sonnet_util` heartbeats to the device, which renders `100 − utilization` for each.
+The **5h / Week** bars plus a **configurable 3rd bar** show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `bar3_util` heartbeats to the device, which renders `100 − utilization` for each.
 
-The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). Sonnet has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the heartbeat wire format, and [references/codexbar-pace.md](references/codexbar-pace.md) for the full codexbar `usage`/`pace` response spec (stage enum, guards, mapping).
+The **3rd bar is a generic name + value slot** — the device draws whatever `bar3_label` the host sends. By default the companion points it at a codexbar *extra-rate window* (`usage.extraRateWindows`, e.g. **"Daily Routines"**, which replaced the old Sonnet window in the codexbar GUI). Retarget or rename it without re-flashing:
+
+```bash
+python3 buddy/scripts/quota_push.py --bar3-id claude-routines     # pick the extra window by id
+python3 buddy/scripts/quota_push.py --bar3-label Routines         # rename the bar
+python3 buddy/scripts/quota_push.py --bar3-label Focus --bar3-value 42  # static, arbitrary value
+```
+
+The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). The 3rd bar has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the heartbeat wire format, and [references/codexbar-pace.md](references/codexbar-pace.md) for the full codexbar `usage`/`pace` response spec (stage enum, guards, mapping).
 
 ### Show quota on the device — runbook
 
@@ -41,9 +49,9 @@ Preview the numbers any time without a device or Bluetooth:
 
 ```bash
 python3 buddy/scripts/quota_push.py --dry-run
-# 5h    : 86% remaining  stage=farBehind     color=0x00FF00
-# Week  : 87% remaining  stage=slightlyAhead color=0xFFAA00
-# Sonnet: 94% remaining  stage=n/a           color=0x00FF00
+# 5h            : 86% remaining  stage=farBehind     color=0x00FF00  expected=27% (0x00FF00)
+# Week          : 87% remaining  stage=slightlyAhead color=0xFFAA00  expected=11% (0xFF0000)
+# Daily Routines: 100% remaining stage=n/a           color=0x00FF00  expected=--
 ```
 
 **Each time you want the bars live**
