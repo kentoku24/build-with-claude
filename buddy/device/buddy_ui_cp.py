@@ -834,32 +834,51 @@ class BuddyUI:
         _LCD.drawString("type it into Claude", 6, 96)
 
     def _draw_footer(self, stats: dict, battery: dict):
-        # Thin stats line between main panel and hint strip, only in
-        # the connected layout. y=96..110 (14 tall) holds one 10-px row.
+        # Battery-remaining bar + voltage/level readout between the main
+        # panel and hint strip, only in the connected layout. y=96..110
+        # (14 tall) holds one 10-px row. The old "Lv/appr/deny" stats text
+        # is now the bar, and the always-zero mA reading is dropped; `stats`
+        # is kept in the signature for call-site compatibility.
         _LCD.fillRect(0, 96, _W, 15, BLACK)
         _LCD.setTextSize(1)
-        _LCD.setTextColor(GRAY_MID, BLACK)
-        left = "Lv.{} a:{} d:{}".format(
-            stats.get("lvl", 0),
-            stats.get("appr", 0),
-            stats.get("deny", 0),
-        )
-        _LCD.drawString(left, 6, 98)
         pct = max(0, min(100, battery.get("pct", 0)))
-        # e.g. "0mA 3950mV 87%" — current (always 0; the Cardputer has no
-        # current sensor) and voltage in CREAM, then the level.
-        prefix = "{}mA {}mV ".format(battery.get("mA", 0), battery.get("mV", 0))
+        # Right side: voltage in CREAM, then the level %, whose colour tracks
+        # the voltage trend (ORANGE rising / GREEN falling / WHITE steady).
+        # mA is dropped — the Cardputer has no current sensor (always 0).
+        prefix = "{}mV ".format(battery.get("mV", 0))
         pct_str = "{}%".format(pct)
-        # Right-align the whole string as a unit — width from textWidth,
-        # not a char-count estimate, so proportional-font surprises (e.g.
-        # '%' being 8 px wide) don't push it off-screen and wrap.
+        # Right-align the whole string as a unit — width from textWidth, not a
+        # char-count estimate, so proportional-font surprises (e.g. '%' being
+        # 8 px wide) don't push it off-screen and wrap.
         start_x = _right(98, 6, prefix + pct_str)
         _LCD.setTextColor(CREAM, BLACK)
         _LCD.drawString(prefix, start_x, 98)
-        # Level colour tracks the voltage trend: ORANGE rising (charging),
-        # GREEN falling (draining), WHITE steady.
         _LCD.setTextColor(self._batt_pct_color, BLACK)
         _LCD.drawString(pct_str, start_x + _LCD.textWidth(prefix), 98)
+        # Left: battery-shaped remaining bar, filled in proportion to pct and
+        # coloured by level (green healthy / yellow caution / red low) so a low
+        # battery reads at a glance. "BAT" tag, then a gray outline with a
+        # terminal nub, then the fill. The bar stops a few px short of the
+        # voltage readout (start_x) so the two never collide.
+        if pct <= 15:
+            fill = RED
+        elif pct <= 35:
+            fill = YELLOW
+        else:
+            fill = GREEN
+        _LCD.setTextColor(GRAY_MID, BLACK)
+        _LCD.drawString("BAT", 6, 98)
+        nub_w = 2
+        bar_x = 6 + _LCD.textWidth("BAT") + 5
+        bar_y = 98
+        bar_h = 9
+        bar_w = start_x - 6 - nub_w - bar_x
+        if bar_w > 4:
+            _LCD.drawRect(bar_x, bar_y, bar_w, bar_h, GRAY_MID)
+            _LCD.fillRect(bar_x + bar_w, bar_y + 2, nub_w, bar_h - 4, GRAY_MID)
+            fill_w = (bar_w - 2) * pct // 100
+            if fill_w > 0:
+                _LCD.fillRect(bar_x + 1, bar_y + 1, fill_w, bar_h - 2, fill)
 
     def _redraw_chrome(self):
         _LCD.fillScreen(BLACK)
