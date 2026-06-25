@@ -63,17 +63,27 @@ See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-co
 
 ## Iterating on device code
 
-`scripts/` has dev tooling for editing device sources without re-running the full onboard flow:
+`scripts/` has dev tooling for editing device sources without re-running the full onboard flow.
+
+**First, check the device is connected** — find its USB-serial port:
 
 ```bash
+# macOS — the Cardputer enumerates as a usbmodem port
+ls /dev/cu.usbmodem*        # e.g. /dev/cu.usbmodem1101
+# Linux:  ls /dev/ttyACM*        Windows: check Device Manager for COMx
+```
+
+Nothing listed means the board isn't enumerated — re-seat the USB-C cable and check the power switch on the top edge is on. (After a `machine.reset()` the port drops and re-enumerates within a few seconds.)
+
+```bash
+# Confirm it responds — lists /flash, and errors out if nothing's connected
+python3 scripts/repl_run.py --port /dev/cu.usbmodem1101 --script "import os; print(os.listdir('/flash'))"
+
 # Push a subset of files over USB-serial
 python3 scripts/push.py --port /dev/cu.usbmodem1101 --files apps/snake.py
 
 # Watch device logs
 python3 scripts/tail_serial.py --port /dev/cu.usbmodem1101
-
-# One-shot REPL exec
-python3 scripts/repl_run.py --port /dev/cu.usbmodem1101 --script "import os; print(os.listdir('/flash'))"
 ```
 
 `gen_burst_frames.py` regenerates `burst_frames.py` from source sprites.
