@@ -851,6 +851,11 @@ class BuddyUI:
         # char-count estimate, so proportional-font surprises (e.g. '%' being
         # 8 px wide) don't push it off-screen and wrap.
         start_x = _right(98, 6, prefix + pct_str)
+        # The bar must NOT key off start_x: that floats with the live digit
+        # count (e.g. "999mV 9%" vs "1023mV 100%"), so the bar would stretch
+        # every time the numbers change. Anchor it to a fixed boundary sized
+        # for the worst-case readout instead, so the bar length stays constant.
+        readout_x = _right(98, 6, "9999mV 100%")
         _LCD.setTextColor(CREAM, BLACK)
         _LCD.drawString(prefix, start_x, 98)
         _LCD.setTextColor(self._batt_pct_color, BLACK)
@@ -859,7 +864,8 @@ class BuddyUI:
         # coloured by level (green healthy / yellow caution / red low) so a low
         # battery reads at a glance. "BAT" tag, then a gray outline with a
         # terminal nub, then the fill. The bar stops a few px short of the
-        # voltage readout (start_x) so the two never collide.
+        # worst-case readout boundary (readout_x) so it never collides with
+        # the live text and never changes length as the numbers do.
         if pct <= 15:
             fill = RED
         elif pct <= 35:
@@ -872,7 +878,7 @@ class BuddyUI:
         bar_x = 6 + _LCD.textWidth("BAT") + 5
         bar_y = 98
         bar_h = 9
-        bar_w = start_x - 6 - nub_w - bar_x
+        bar_w = readout_x - 6 - nub_w - bar_x
         if bar_w > 4:
             _LCD.drawRect(bar_x, bar_y, bar_w, bar_h, GRAY_MID)
             _LCD.fillRect(bar_x + bar_w, bar_y + 2, nub_w, bar_h - 4, GRAY_MID)
