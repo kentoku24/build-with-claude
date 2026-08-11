@@ -1,10 +1,11 @@
 """Three-button launcher for the device-basic buddy bundle.
 
 Menu keys: A = move up, B = move down, C = launch selected app.
-Apps are the ``.py`` files in ``/flash/apps/``, discovered
-dynamically at boot. Selection is driven by the three buttons
-(A / B / C); the launched app runs at import time and exits via
-``machine.reset()``, which reboots straight back to this launcher.
+Apps are the ``.py`` / ``.mpy`` files in ``/flash/apps/``,
+discovered dynamically at boot. Selection is driven by the three
+buttons (A / B / C); the launched app runs at import time and exits
+via ``machine.reset()``, which reboots straight back to this
+launcher.
 
 No WiFi at boot: ``wifi_event.py`` ships in this bundle (it is a
 byte-for-byte requirement of the port), but this launcher never
@@ -67,19 +68,28 @@ def _discover_apps():
     Display name is the same but with underscores turned into spaces
     and title-cased — gives a slightly friendlier menu than raw
     filenames without forcing us to ship a separate metadata file.
+
+    Apps may be ``.py`` (source) or ``.mpy`` (precompiled bytecode —
+    the ESP32 Classic's small heap cannot compile the full buddy
+    bundle in RAM, so the modules ship precompiled). When a module
+    exists in both forms, ``.mpy`` wins (import prefers it anyway,
+    and listing it once keeps the menu honest).
     """
     try:
-        files = sorted(
-            f for f in os.listdir(_APPS_DIR) if f.endswith(".py")
-        )
+        entries = os.listdir(_APPS_DIR)
     except OSError as e:
         print("launcher: cannot list", _APPS_DIR, e)
         return []
+    mods = {}
+    for fname in entries:
+        if fname.endswith(".py"):
+            mods.setdefault(fname[:-3], fname)
+        elif fname.endswith(".mpy"):
+            mods[fname[:-4]] = fname  # precompiled bytecode wins
     out = []
-    for fname in files:
-        mod = fname[:-3]
-        # Skip private/helper modules — a .py dropped in for a helper
-        # shouldn't land in the visible menu.
+    for mod in sorted(mods):
+        # Skip private/helper modules — a helper dropped in shouldn't
+        # land in the visible menu.
         if mod.startswith("_"):
             continue
         display = mod.replace("_", " ")
