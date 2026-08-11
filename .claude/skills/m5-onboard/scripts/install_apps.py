@@ -1,4 +1,4 @@
-"""Install a bundle of MicroPython .py files onto /flash/ on the device.
+"""Install a bundle of MicroPython .py and/or .mpy files onto /flash/ on the device.
 
 This is the second step after "flash firmware": it copies the user's
 app sources onto the device so it boots into their software instead
@@ -10,15 +10,15 @@ that runs on top of UIFlow.
 Two layouts are supported, chosen by whether the source directory
 has an ``apps/`` subdir:
 
-- **Flat (legacy, Basic-style):** every ``*.py`` at the source root
-  is uploaded to ``/flash/``. The bundle is expected to ship a
-  custom ``boot.py`` and/or ``main.py`` that drives the device, and
-  UIFlow's own launcher is bypassed.
-- **Nested (Cardputer-style, preferred):** ``*.py`` at the source
-  root is uploaded to ``/flash/`` (these are peer modules like
+- **Flat (legacy, Basic-style):** every ``*.py``/``*.mpy`` at the
+  source root is uploaded to ``/flash/``. The bundle is expected to
+  ship a custom ``boot.py`` and/or ``main.py`` that drives the
+  device, and UIFlow's own launcher is bypassed.
+- **Nested (Cardputer-style, preferred):** ``*.py``/``*.mpy`` at the
+  source root is uploaded to ``/flash/`` (these are peer modules like
   ``buddy_ble.py`` that apps import but which shouldn't appear in
-  the launcher menu). ``*.py`` under ``apps/`` is uploaded to
-  ``/flash/apps/``, which is the directory UIFlow's stock App List
+  the launcher menu). ``*.py``/``*.mpy`` under ``apps/`` is uploaded
+  to ``/flash/apps/``, which is the directory UIFlow's stock App List
   scans for selectable entries. No custom ``boot.py`` is needed;
   UIFlow boots normally and the user picks the app from the menu.
   ``/flash/apps/`` is created on the device if it doesn't exist.
@@ -261,24 +261,31 @@ def _upload_file(s, src_path: str, dest_path: str) -> None:
 def _plan_uploads(src_dir: str):
     """Walk ``src_dir`` and return a list of ``(src_path, dest_path)``.
 
-    Everything at the source root goes to ``/flash/``. Anything in an
-    ``apps/`` subdir goes to ``/flash/apps/`` — that's the directory
-    UIFlow's stock App List reads, so apps placed there show up in
-    the launcher menu. Other subdirs aren't handled here; if a bundle
-    needs a different layout, extend this function rather than bolting
-    it on at the caller.
+    The bundle may contain ``.py`` and/or ``.mpy`` files; both are
+    collected. Everything at the source root goes to ``/flash/``.
+    Anything in an ``apps/`` subdir goes to ``/flash/apps/`` — that's
+    the directory UIFlow's stock App List reads, so apps placed there
+    show up in the launcher menu. Other subdirs aren't handled here;
+    if a bundle needs a different layout, extend this function rather
+    than bolting it on at the caller.
 
     Returned in a stable order: root files first (peer modules load
     before apps that import them), then apps/ files alphabetically.
     """
     plan = []
-    root_files = sorted(glob.glob(os.path.join(src_dir, "*.py")))
+    root_files = sorted(
+        glob.glob(os.path.join(src_dir, "*.py"))
+        + glob.glob(os.path.join(src_dir, "*.mpy"))
+    )
     for p in root_files:
         plan.append((p, "/flash/" + os.path.basename(p)))
 
     apps_dir = os.path.join(src_dir, "apps")
     if os.path.isdir(apps_dir):
-        for p in sorted(glob.glob(os.path.join(apps_dir, "*.py"))):
+        for p in sorted(
+            glob.glob(os.path.join(apps_dir, "*.py"))
+            + glob.glob(os.path.join(apps_dir, "*.mpy"))
+        ):
             plan.append((p, "/flash/apps/" + os.path.basename(p)))
 
     return plan
@@ -292,8 +299,9 @@ def install(
 ) -> None:
     """Push a bundle from ``src_dir`` onto the device.
 
-    Layout handling is described in the module docstring: root ``*.py``
-    lands at ``/flash/``, ``apps/*.py`` lands at ``/flash/apps/``.
+    Layout handling is described in the module docstring: root
+    ``*.py``/``*.mpy`` lands at ``/flash/``, ``apps/*.py``/``apps/*.mpy``
+    lands at ``/flash/apps/``.
 
     If ``files`` is given, only those basenames are uploaded — the
     basenames are matched against the plan's destination basenames,
@@ -305,7 +313,7 @@ def install(
     src_dir = os.path.abspath(src_dir)
     plan = _plan_uploads(src_dir)
     if not plan:
-        raise RuntimeError("no .py files found under {}".format(src_dir))
+        raise RuntimeError("no .py/.mpy files found under {}".format(src_dir))
 
     if files is not None:
         wanted = set(files)
