@@ -258,22 +258,43 @@ def _upload_file(s, src_path: str, dest_path: str) -> None:
         raise RuntimeError("close/verify failed:\n" + out)
 
 
+def _dedupe_by_module(paths: list[str]) -> list[str]:
+    """Given ``.py``/``.mpy`` paths, keep one file per module name.
+
+    When a module ships both forms, the ``.mpy`` wins. MicroPython
+    prefers ``.py`` at import time (py/builtinimport.c
+    stat_file_py_or_mpy), so shipping both would let the ``.py``
+    shadow the precompiled bytecode and defeat the RAM savings the
+    ``.mpy`` bundle exists for.
+    """
+    mods: dict[str, str] = {}
+    for p in paths:
+        base = os.path.basename(p)
+        mod = base[:-4] if base.endswith(".mpy") else base[:-3]
+        if mod not in mods or p.endswith(".mpy"):
+            mods[mod] = p
+    return sorted(mods.values())
+
+
 def _plan_uploads(src_dir: str):
     """Walk ``src_dir`` and return a list of ``(src_path, dest_path)``.
 
-    The bundle may contain ``.py`` and/or ``.mpy`` files; both are
-    collected. Everything at the source root goes to ``/flash/``.
-    Anything in an ``apps/`` subdir goes to ``/flash/apps/`` — that's
-    the directory UIFlow's stock App List reads, so apps placed there
-    show up in the launcher menu. Other subdirs aren't handled here;
-    if a bundle needs a different layout, extend this function rather
-    than bolting it on at the caller.
+    The bundle may contain ``.py`` and/or ``.mpy`` files. When a
+    module ships both ``.py`` and ``.mpy``, only the ``.mpy`` is
+    uploaded — MicroPython prefers ``.py`` at import time, so
+    shipping both would shadow the precompiled bytecode and defeat
+    RAM savings on the ESP32 Classic. Everything at the source root
+    goes to ``/flash/``. Anything in an ``apps/`` subdir goes to
+    ``/flash/apps/`` — that's the directory UIFlow's stock App List
+    reads, so apps placed there show up in the launcher menu. Other
+    subdirs aren't handled here; if a bundle needs a different layout,
+    extend this function rather than bolting it on at the caller.
 
     Returned in a stable order: root files first (peer modules load
     before apps that import them), then apps/ files alphabetically.
     """
     plan = []
-    root_files = sorted(
+    root_files = _dedupe_by_module(
         glob.glob(os.path.join(src_dir, "*.py"))
         + glob.glob(os.path.join(src_dir, "*.mpy"))
     )
@@ -282,7 +303,7 @@ def _plan_uploads(src_dir: str):
 
     apps_dir = os.path.join(src_dir, "apps")
     if os.path.isdir(apps_dir):
-        for p in sorted(
+        for p in _dedupe_by_module(
             glob.glob(os.path.join(apps_dir, "*.py"))
             + glob.glob(os.path.join(apps_dir, "*.mpy"))
         ):
