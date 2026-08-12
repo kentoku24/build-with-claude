@@ -7,7 +7,7 @@ it reads the quota from **codexbar** and writes, per heartbeat, a bar
 length and a bar colour for each window to the device's Nordic-UART RX
 characteristic, so the bars track the real account quota.
 
-Backend: `codexbar --provider anthropic --format json`. Its first array
+Backend: `codexbar --provider claude --format json`. Its first array
 entry has `usage.{primary, secondary, tertiary}.usedPercent` (the bar
 length) and `pace.{primary, secondary}.stage` (which we turn into a
 colour here, host-side):
@@ -54,7 +54,7 @@ reconnect from Claude.app for the approval workflow.
 ### Requirements
 
     pip install bleak                # BLE central for macOS/Linux/Windows
-    codexbar on PATH, authenticated  # `codexbar --provider anthropic --format json`
+    codexbar on PATH, authenticated  # `codexbar --provider claude --format json`
 
 ### Usage
 
@@ -87,7 +87,7 @@ NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 # to plain `codexbar` on PATH (no pace -> bars colour by remaining-% only,
 # no expected tick).
 CODEXBAR_BIN = os.environ.get("CODEXBAR_BIN", "codexbar")
-CODEXBAR_CMD = [CODEXBAR_BIN, "--provider", "anthropic", "--format", "json"]
+CODEXBAR_CMD = [CODEXBAR_BIN, "--provider", "claude", "--format", "json"]
 DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
@@ -154,7 +154,7 @@ def _read_codexbar():
         raise SystemExit(
             "codexbar binary not found: %r. Install it (e.g. `brew install codexbar`) "
             "or set CODEXBAR_BIN to a build, and make sure "
-            "`%s --provider anthropic --format json` works." % (CODEXBAR_BIN, CODEXBAR_BIN)
+            "`%s --provider claude --format json` works." % (CODEXBAR_BIN, CODEXBAR_BIN)
         )
     except subprocess.TimeoutExpired:
         raise SystemExit("codexbar timed out.")
