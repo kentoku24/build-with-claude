@@ -76,7 +76,7 @@ def _read_battery():
          of register 0x78 at address 0x75, decoded with
          decode_led_bitmap().  `usb` stays True (uncharged status is
          not exposed this way).
-      3. On any OSError -- including an absent I2C bus -- returns
+      3. On any failure -- including an absent I2C bus -- returns
          EXACTLY {"pct": 0, "mV": 0, "mA": 0, "usb": True}.
     `machine` and `M5` are imported here (not at module level) so this
     file stays importable on CPython.
@@ -101,5 +101,5 @@ def _read_battery():
         i2c = machine.I2C(0, sda=machine.Pin(21), scl=machine.Pin(22), freq=100000)
         raw = i2c.readfrom_mem(_IP5306_ADDR, _IP5306_REG_LED, 1)[0]
         return {"pct": decode_led_bitmap(raw), "mV": 0, "mA": 0, "usb": True}
-    except OSError:
+    except Exception:
         return {"pct": 0, "mV": 0, "mA": 0, "usb": True}

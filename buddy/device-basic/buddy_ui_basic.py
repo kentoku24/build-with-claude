@@ -789,18 +789,14 @@ class BuddyUI:
         _LCD.drawString("type it into Claude", 6, 140)
 
     def _draw_footer(self, stats: dict, battery: dict):
-        # Thin stats line between main panel and hint strip, only in
-        # the connected layout. y=182..216 (34 tall) holds the stats
-        # row and the level-coloured battery bar on the right.
+        # Battery-level bar between main panel and hint strip, only in
+        # the connected layout. y=182..216 (34 tall). `stats` stays in
+        # the signature for call-site compatibility even though it's
+        # unused here — mirrors buddy_ui_cp.py's _draw_footer (45e2e39),
+        # which dropped this same "Lv.{} a:{} d:{}" text for being noise
+        # next to the battery state.
         _LCD.fillRect(0, 182, _W, 34, BLACK)
         _LCD.setTextSize(1)
-        _LCD.setTextColor(GRAY_MID, BLACK)
-        left = "Lv.{} a:{} d:{}".format(
-            stats.get("lvl", 0),
-            stats.get("appr", 0),
-            stats.get("deny", 0),
-        )
-        _LCD.drawString(left, 6, 182)
         pct = max(0, min(100, battery.get("pct", 0)))
         # Level-coloured battery bar: outline + fill sized to pct, with
         # colour thresholds RED<=15 / YELLOW<=35 / GREEN above.

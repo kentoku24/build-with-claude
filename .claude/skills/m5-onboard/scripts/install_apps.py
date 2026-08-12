@@ -155,10 +155,10 @@ def _sweep_stale_apps(s, bundle_apps) -> None:
     image and re-installs on every fresh firmware flash).
 
     ``bundle_apps`` is the list of basenames we're about to upload
-    (e.g. ``["claude_buddy.py", "hello_cardputer.py", "snake.py"]``).
-    Anything else ending in ``.py`` under ``/flash/apps/`` is
-    considered stale and removed. Non-``.py`` files are left alone
-    on the off-chance someone has dropped data assets there.
+    (e.g. ``["claude_buddy.mpy", "hello_cardputer.py", "snake.py"]``).
+    Anything else ending in ``.py``/``.mpy`` under ``/flash/apps/`` is
+    considered stale and removed. Other files are left alone on the
+    off-chance someone has dropped data assets there.
     """
     # Build the "keep" set as a Python set literal in the script, so
     # the device doesn't have to parse a long argv-style string.
@@ -172,7 +172,7 @@ def _sweep_stale_apps(s, bundle_apps) -> None:
         "except OSError:\n"
         "    entries = []\n"
         "for f in entries:\n"
-        "    if f.endswith('.py') and f not in keep:\n"
+        "    if (f.endswith('.py') or f.endswith('.mpy')) and f not in keep:\n"
         "        try:\n"
         "            uos.remove('/flash/apps/' + f)\n"
         "            removed.append(f)\n"
@@ -258,6 +258,11 @@ def _upload_file(s, src_path: str, dest_path: str) -> None:
         raise RuntimeError("close/verify failed:\n" + out)
 
 
+def _module_name(basename: str) -> str:
+    """Strip a ``.py``/``.mpy`` extension off a source or device basename."""
+    return basename[:-4] if basename.endswith(".mpy") else basename[:-3]
+
+
 def _dedupe_by_module(paths: list[str]) -> list[str]:
     """Given ``.py``/``.mpy`` paths, keep one file per module name.
 
@@ -269,8 +274,7 @@ def _dedupe_by_module(paths: list[str]) -> list[str]:
     """
     mods: dict[str, str] = {}
     for p in paths:
-        base = os.path.basename(p)
-        mod = base[:-4] if base.endswith(".mpy") else base[:-3]
+        mod = _module_name(os.path.basename(p))
         if mod not in mods or p.endswith(".mpy"):
             mods[mod] = p
     return sorted(mods.values())
@@ -337,11 +341,15 @@ def install(
         raise RuntimeError("no .py/.mpy files found under {}".format(src_dir))
 
     if files is not None:
-        wanted = set(files)
-        plan = [(s, d) for (s, d) in plan if os.path.basename(d) in wanted]
+        # Match by module name, not literal basename: a bundle that
+        # dedupes a module to its .mpy (see _dedupe_by_module) would
+        # otherwise silently drop a files=["mod.py"] request that no
+        # longer has a literal "mod.py" entry in the plan.
+        wanted = {_module_name(f) for f in files}
+        plan = [(s, d) for (s, d) in plan if _module_name(os.path.basename(d)) in wanted]
         if not plan:
             raise RuntimeError(
-                "requested files not found in bundle: {}".format(sorted(wanted))
+                "requested files not found in bundle: {}".format(sorted(files))
             )
 
     # Which root-level basenames are in the plan? boot.py backup

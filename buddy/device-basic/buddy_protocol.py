@@ -81,6 +81,16 @@ class BuddyProtocol:
         # request arrived. The run loop polls unpair_pending() at its
         # tick rate, which auto-resolves the timeout.
         self._unpair_pending_ms = 0
+        # UI work queued from on_line()/_on_heartbeat(), which run in
+        # BLE schedule context. Mirrors claude_buddy.py's pending_state/
+        # pending_passkey pattern: callbacks only mutate this plain
+        # state, and drain_ui() (called once per main-loop tick) is
+        # what actually issues the LCD draws — so a heartbeat or
+        # unpair command arriving mid-draw can't interleave SPI writes
+        # with an in-progress footer/animation repaint.
+        self._pending_identity = False
+        self._pending_unpair_prompt = False
+        self._pending_heartbeat = None
 
     # ----- inbound
 
@@ -102,12 +112,12 @@ class BuddyProtocol:
             new = msg.get("name", "").strip()
             if new:
                 self.state.set_name(new)
-                self.ui.update_identity(self.state.name, self.state.owner)
+                self._pending_identity = True
             self._send({"ack": "name", "ok": bool(new), "name": self.state.name})
             return
         if cmd == "owner":
             self.state.set_owner(msg.get("owner", "").strip())
-            self.ui.update_identity(self.state.name, self.state.owner)
+            self._pending_identity = True
             self._send({"ack": "owner", "ok": True, "owner": self.state.owner})
             return
         if cmd == "unpair":
@@ -116,7 +126,7 @@ class BuddyProtocol:
             # model. Re-arming the timer on duplicate requests is fine
             # — the user just sees the prompt persist.
             self._unpair_pending_ms = time.ticks_ms() or 1  # avoid 0
-            self.ui.show_unpair_prompt()
+            self._pending_unpair_prompt = True
             self._send({
                 "ack": "unpair",
                 "ok": False,
@@ -158,7 +168,7 @@ class BuddyProtocol:
         print("buddy_protocol: unclassified msg, keys:", list(msg.keys()))
 
     def _on_heartbeat(self, hb: dict) -> None:
-        self.ui.update_heartbeat(hb)
+        self._pending_heartbeat = hb
         prompt = hb.get("prompt")
         if prompt and prompt.get("id"):
             self._pending = {
@@ -172,6 +182,24 @@ class BuddyProtocol:
             self._pending = {"id": None, "tool": None, "hint": None}
 
     # ----- outbound
+
+    def drain_ui(self) -> None:
+        """Apply UI work queued by on_line()/_on_heartbeat().
+
+        Call once per main-loop tick. See the _pending_* fields in
+        __init__ for why this exists: BLE-callback context must not
+        call multi-step LCD draw routines directly.
+        """
+        if self._pending_identity:
+            self._pending_identity = False
+            self.ui.update_identity(self.state.name, self.state.owner)
+        if self._pending_unpair_prompt:
+            self._pending_unpair_prompt = False
+            self.ui.show_unpair_prompt()
+        hb = self._pending_heartbeat
+        if hb is not None:
+            self._pending_heartbeat = None
+            self.ui.update_heartbeat(hb)
 
     def send_hello(self) -> None:
         """Called once on BLE encryption-established to announce ourselves.

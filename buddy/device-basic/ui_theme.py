@@ -74,8 +74,10 @@ def footer(lcd, a="", b="", c=""):
         lcd.setCursor(132, 225)
         lcd.print(b)
     if c:
-        # Right-align the C label against the physical button.
-        x = 320 - 12 - 6 * len(c)
+        # Right-align the C label against the physical button. Uses
+        # textWidth(), not a char-count estimate — see buddy_ui_basic.py's
+        # note on proportional font widths (e.g. "100%" is 31px, not 24px).
+        x = 320 - 12 - lcd.textWidth(c)
         lcd.setCursor(x, 225)
         lcd.print(c)
 

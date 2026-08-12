@@ -106,6 +106,20 @@ def _mac_suffix(mac_bytes: bytes) -> str:
 _stack = None  # dict: {"ble", "rx", "tx", "name", "pairing"} once initialized
 
 
+def pairing_supported() -> bool:
+    """Whether the active BLE stack supports pairing.
+
+    Reads the module-level ``_stack`` directly rather than going through
+    a ``BuddyBLE`` instance, so callers can check this even before a
+    ``BuddyBLE(...)`` constructor call has returned — ``_ensure_stack()``
+    populates ``_stack`` before ``__init__`` arms the IRQ handler, so this
+    is always accurate by the time any event could fire. Returns False
+    (the current hard-coded value) if the stack hasn't been initialized
+    yet at all.
+    """
+    return bool(_stack and _stack["pairing"])
+
+
 def _ensure_stack(name_prefix: str):
     """Return the cached BLE stack, initializing it on first call.
 

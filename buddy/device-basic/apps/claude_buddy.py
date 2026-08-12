@@ -153,23 +153,17 @@ def run():
     def on_passkey(pk):
         pending_passkey[0] = pk
 
-    # Pre-bind so on_state_change's closure can resolve `ble` even if
-    # the IRQ fires during BuddyBLE.__init__ (a central that connects
-    # mid-init can deliver _IRQ_CENTRAL_CONNECT before the
-    # `ble = BuddyBLE(...)` assignment below completes). Without this
-    # pre-bind, on_state_change raises NameError in IRQ context and
-    # the link is silently lost. The `is None` guard means the very
-    # first event during init won't get the pairing-aware remap, but
-    # any subsequent event will — and the run loop stays alive.
-    ble = None
-
     def on_state_change(s):
         # The stripped UIFlow 2.0 BLE build doesn't fire
         # _IRQ_ENCRYPTION_UPDATE, so "connected" is terminal. Remap
         # it to "encrypted" so the UI advances past the PAIR... badge
-        # and the protocol starts emitting its hello.
+        # and the protocol starts emitting its hello. Queries
+        # buddy_ble.pairing_supported() (module-level state) rather
+        # than an instance attribute on `ble`, so this is correct even
+        # if a central connects mid-BuddyBLE.__init__, before the
+        # `ble = BuddyBLE(...)` assignment below has completed.
         effective = s
-        if s == "connected" and ble is not None and not ble.pairing_supported:
+        if s == "connected" and not buddy_ble.pairing_supported():
             effective = "encrypted"
         print("claude_buddy: state", s, "->", effective)
         pending_state[0] = effective
@@ -237,6 +231,7 @@ def run():
             if new_pk is not None:
                 pending_passkey[0] = None
                 ui.show_passkey(new_pk)
+            proto.drain_ui()
 
             M5.update()
 

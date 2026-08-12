@@ -76,11 +76,9 @@ for junk in (None, "abc", [], object(), -5):
 check("voltage_to_pct total over junk inputs", not bad, f"got {bad}")
 
 # f. OSError fallback: inject a fake `machine` whose I2C construction
-#    raises OSError, then assert the EXACT fallback dict.  Without the
-#    stub, CPython raises ImportError at the inner `import machine`,
-#    which `except OSError` never catches -- so the stub is mandatory.
-#    (`import M5` also fails on CPython, which the try/except around the
-#    M5 path turns into a pass through to the machine read.)
+#    raises OSError, then assert the EXACT fallback dict. (`import M5`
+#    also fails on CPython, which the try/except around the M5 path
+#    turns into a pass through to the machine read.)
 class _I2C:
     def __init__(self, *args, **kwargs):
         raise OSError("I2C bus absent")
