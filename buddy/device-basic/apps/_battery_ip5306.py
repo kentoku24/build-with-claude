@@ -1,13 +1,25 @@
 """IP5306 battery gauge reader for the device-basic bundle.
 
 The IP5306 power IC (classic M5Stack Basic) exposes a 4-LED battery
-gauge at register 0x78 (high nibble = bitmap of lit LEDs). There is no
-voltage/current readout, so pct is quantized to 0/25/50/75/100 by
-counting consecutive lit bits from the MSB of the high nibble.
+SOC gauge at register 0x78 (read-only; high nibble = LED state).  The
+register semantics are INVERTED vs the physical LED count in the M5Stack
+firmware: 0x00 (no LEDs lit) means FULL (100%), and each LED that lights
+as the cell drains drops the level by 25% (0x80->75, 0xC0->50, 0xE0->25,
+anything else including 0xF0 -> 0).  This is the mapping used by both
+M5Stack/src/utility/Power.cpp and M5Unified IP5306_Class.cpp.
 
-This module is import-safe on plain CPython: `machine` is imported only
-inside `_read_battery()`, and that function never raises (any OSError
-returns the fallback dict).
+The authoritative source is the firmware's own M5.Power.getBatteryLevel()
+(which reads exactly this register through the firmware's I2C driver, and
+additionally reports isCharging()); a raw machine.I2C read of 0x78 with
+decode_led_bitmap() is the fallback when the M5 module is unavailable.
+The IP5306 exposes NO voltage/current ADC (datasheet: "no internal
+voltage and current information"), so mV/mA are always 0 on this chip;
+voltage_to_pct() is a pure helper for firmware builds that DO report a
+real battery voltage.
+
+This module is import-safe on plain CPython: `machine` and `M5` are
+imported only inside `_read_battery()`, and that function never raises
+(any failure returns the exact fallback dict).
 """
 
 _IP5306_ADDR = 0x75
@@ -17,36 +29,77 @@ _IP5306_REG_LED = 0x78
 def decode_led_bitmap(byte):
     """Return the battery percent for any byte value, never raising.
 
-    Counts consecutive lit bits starting from the MSB of the high
-    nibble (bit 7 of the low byte mask), giving the canonical map
-    0x00->0, 0x80->25, 0xC0->50, 0xE0->75, 0xF0->100.  A non-canonical
-    byte such as 0x90 has its leading run of lit bits truncated at the
-    first unlit bit, so it still maps into {0, 25, 50, 75, 100}; the
-    function is total over all 256 byte values and never raises.
+    Maps the IP5306 0x78 high nibble using the M5Stack firmware's
+    INVERTED LED semantics: 0x00 -> 100, 0x80 -> 75, 0xC0 -> 50,
+    0xE0 -> 25, everything else (incl. 0xF0 = all four LEDs lit) -> 0.
+    Total over all 256 byte values and never raises.
     """
-    bits = 0
-    v = byte & 0xF0
-    while v & 0x80:
-        bits += 1
-        v = (v << 1) & 0xFF
-    return bits * 25
+    high = byte & 0xF0
+    if high == 0x00:
+        return 100
+    if high == 0x80:
+        return 75
+    if high == 0xC0:
+        return 50
+    if high == 0xE0:
+        return 25
+    return 0
+
+
+def voltage_to_pct(mv):
+    """Map a battery voltage (mV) to a percent in 0..100, never raising.
+
+    Linear curve from 3300 mV (0%) to 4200 mV (100%), clamped outside
+    that range: pct = (mv - 3300) * 100 // 900.  Any non-numeric input
+    maps to 0.  Total and never raises.
+    """
+    try:
+        pct = (int(mv) - 3300) * 100 // 900
+    except Exception:
+        return 0
+    if pct < 0:
+        return 0
+    if pct > 100:
+        return 100
+    return pct
 
 
 def _read_battery():
-    """Read the IP5306 gauge over I2C; returns a dict and never raises.
+    """Read the IP5306 battery gauge; returns a dict and never raises.
 
-    Constructs machine.I2C(0, sda=Pin(21), scl=Pin(22), freq=100000)
-    and reads register 0x78 of address 0x75.  `machine` is imported
-    here (not at module level) so this file stays importable on
-    CPython.  On any OSError -- including an absent I2C bus -- returns
-    EXACTLY {"pct": 0, "mV": 0, "mA": 0, "usb": True}.
+    Precedence:
+      1. M5.Power.getBatteryLevel() (authoritative firmware gauge).
+         If it returns a valid 0..100, report it along with
+         M5.Power.isCharging() as `usb`.  If that fails or is invalid,
+         fall through to the raw register read.
+      2. Raw machine.I2C(0, sda=Pin(21), scl=Pin(22), freq=100000) read
+         of register 0x78 at address 0x75, decoded with
+         decode_led_bitmap().  `usb` stays True (uncharged status is
+         not exposed this way).
+      3. On any OSError -- including an absent I2C bus -- returns
+         EXACTLY {"pct": 0, "mV": 0, "mA": 0, "usb": True}.
+    `machine` and `M5` are imported here (not at module level) so this
+    file stays importable on CPython.
     """
+    try:
+        import M5
+
+        pct = M5.Power.getBatteryLevel()
+        if isinstance(pct, int) and 0 <= pct <= 100:
+            usb = True
+            try:
+                usb = bool(M5.Power.isCharging())
+            except Exception:
+                pass
+            return {"pct": pct, "mV": 0, "mA": 0, "usb": usb}
+    except Exception:
+        pass
+
     try:
         import machine
 
         i2c = machine.I2C(0, sda=machine.Pin(21), scl=machine.Pin(22), freq=100000)
-        buf = i2c.readfrom_mem(_IP5306_ADDR, _IP5306_REG_LED, 1)
-        high = buf[0] & 0xF0
-        return {"pct": decode_led_bitmap(high), "mV": 0, "mA": 0, "usb": True}
+        raw = i2c.readfrom_mem(_IP5306_ADDR, _IP5306_REG_LED, 1)[0]
+        return {"pct": decode_led_bitmap(raw), "mV": 0, "mA": 0, "usb": True}
     except OSError:
         return {"pct": 0, "mV": 0, "mA": 0, "usb": True}
