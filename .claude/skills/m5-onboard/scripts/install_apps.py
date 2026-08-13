@@ -1,4 +1,4 @@
-"""Install a bundle of MicroPython .py files onto /flash/ on the device.
+"""Install a bundle of MicroPython .py and/or .mpy files onto /flash/ on the device.
 
 This is the second step after "flash firmware": it copies the user's
 app sources onto the device so it boots into their software instead
@@ -10,15 +10,15 @@ that runs on top of UIFlow.
 Two layouts are supported, chosen by whether the source directory
 has an ``apps/`` subdir:
 
-- **Flat (legacy, Basic-style):** every ``*.py`` at the source root
-  is uploaded to ``/flash/``. The bundle is expected to ship a
-  custom ``boot.py`` and/or ``main.py`` that drives the device, and
-  UIFlow's own launcher is bypassed.
-- **Nested (Cardputer-style, preferred):** ``*.py`` at the source
-  root is uploaded to ``/flash/`` (these are peer modules like
+- **Flat (legacy, Basic-style):** every ``*.py``/``*.mpy`` at the
+  source root is uploaded to ``/flash/``. The bundle is expected to
+  ship a custom ``boot.py`` and/or ``main.py`` that drives the
+  device, and UIFlow's own launcher is bypassed.
+- **Nested (Cardputer-style, preferred):** ``*.py``/``*.mpy`` at the
+  source root is uploaded to ``/flash/`` (these are peer modules like
   ``buddy_ble.py`` that apps import but which shouldn't appear in
-  the launcher menu). ``*.py`` under ``apps/`` is uploaded to
-  ``/flash/apps/``, which is the directory UIFlow's stock App List
+  the launcher menu). ``*.py``/``*.mpy`` under ``apps/`` is uploaded
+  to ``/flash/apps/``, which is the directory UIFlow's stock App List
   scans for selectable entries. No custom ``boot.py`` is needed;
   UIFlow boots normally and the user picks the app from the menu.
   ``/flash/apps/`` is created on the device if it doesn't exist.
@@ -155,10 +155,10 @@ def _sweep_stale_apps(s, bundle_apps) -> None:
     image and re-installs on every fresh firmware flash).
 
     ``bundle_apps`` is the list of basenames we're about to upload
-    (e.g. ``["claude_buddy.py", "hello_cardputer.py", "snake.py"]``).
-    Anything else ending in ``.py`` under ``/flash/apps/`` is
-    considered stale and removed. Non-``.py`` files are left alone
-    on the off-chance someone has dropped data assets there.
+    (e.g. ``["claude_buddy.mpy", "hello_cardputer.py", "snake.py"]``).
+    Anything else ending in ``.py``/``.mpy`` under ``/flash/apps/`` is
+    considered stale and removed. Other files are left alone on the
+    off-chance someone has dropped data assets there.
     """
     # Build the "keep" set as a Python set literal in the script, so
     # the device doesn't have to parse a long argv-style string.
@@ -172,7 +172,7 @@ def _sweep_stale_apps(s, bundle_apps) -> None:
         "except OSError:\n"
         "    entries = []\n"
         "for f in entries:\n"
-        "    if f.endswith('.py') and f not in keep:\n"
+        "    if (f.endswith('.py') or f.endswith('.mpy')) and f not in keep:\n"
         "        try:\n"
         "            uos.remove('/flash/apps/' + f)\n"
         "            removed.append(f)\n"
@@ -258,27 +258,59 @@ def _upload_file(s, src_path: str, dest_path: str) -> None:
         raise RuntimeError("close/verify failed:\n" + out)
 
 
+def _module_name(basename: str) -> str:
+    """Strip a ``.py``/``.mpy`` extension off a source or device basename."""
+    return basename[:-4] if basename.endswith(".mpy") else basename[:-3]
+
+
+def _dedupe_by_module(paths: list[str]) -> list[str]:
+    """Given ``.py``/``.mpy`` paths, keep one file per module name.
+
+    When a module ships both forms, the ``.mpy`` wins. MicroPython
+    prefers ``.py`` at import time (py/builtinimport.c
+    stat_file_py_or_mpy), so shipping both would let the ``.py``
+    shadow the precompiled bytecode and defeat the RAM savings the
+    ``.mpy`` bundle exists for.
+    """
+    mods: dict[str, str] = {}
+    for p in paths:
+        mod = _module_name(os.path.basename(p))
+        if mod not in mods or p.endswith(".mpy"):
+            mods[mod] = p
+    return sorted(mods.values())
+
+
 def _plan_uploads(src_dir: str):
     """Walk ``src_dir`` and return a list of ``(src_path, dest_path)``.
 
-    Everything at the source root goes to ``/flash/``. Anything in an
-    ``apps/`` subdir goes to ``/flash/apps/`` — that's the directory
-    UIFlow's stock App List reads, so apps placed there show up in
-    the launcher menu. Other subdirs aren't handled here; if a bundle
-    needs a different layout, extend this function rather than bolting
-    it on at the caller.
+    The bundle may contain ``.py`` and/or ``.mpy`` files. When a
+    module ships both ``.py`` and ``.mpy``, only the ``.mpy`` is
+    uploaded — MicroPython prefers ``.py`` at import time, so
+    shipping both would shadow the precompiled bytecode and defeat
+    RAM savings on the ESP32 Classic. Everything at the source root
+    goes to ``/flash/``. Anything in an ``apps/`` subdir goes to
+    ``/flash/apps/`` — that's the directory UIFlow's stock App List
+    reads, so apps placed there show up in the launcher menu. Other
+    subdirs aren't handled here; if a bundle needs a different layout,
+    extend this function rather than bolting it on at the caller.
 
     Returned in a stable order: root files first (peer modules load
     before apps that import them), then apps/ files alphabetically.
     """
     plan = []
-    root_files = sorted(glob.glob(os.path.join(src_dir, "*.py")))
+    root_files = _dedupe_by_module(
+        glob.glob(os.path.join(src_dir, "*.py"))
+        + glob.glob(os.path.join(src_dir, "*.mpy"))
+    )
     for p in root_files:
         plan.append((p, "/flash/" + os.path.basename(p)))
 
     apps_dir = os.path.join(src_dir, "apps")
     if os.path.isdir(apps_dir):
-        for p in sorted(glob.glob(os.path.join(apps_dir, "*.py"))):
+        for p in _dedupe_by_module(
+            glob.glob(os.path.join(apps_dir, "*.py"))
+            + glob.glob(os.path.join(apps_dir, "*.mpy"))
+        ):
             plan.append((p, "/flash/apps/" + os.path.basename(p)))
 
     return plan
@@ -292,8 +324,9 @@ def install(
 ) -> None:
     """Push a bundle from ``src_dir`` onto the device.
 
-    Layout handling is described in the module docstring: root ``*.py``
-    lands at ``/flash/``, ``apps/*.py`` lands at ``/flash/apps/``.
+    Layout handling is described in the module docstring: root
+    ``*.py``/``*.mpy`` lands at ``/flash/``, ``apps/*.py``/``apps/*.mpy``
+    lands at ``/flash/apps/``.
 
     If ``files`` is given, only those basenames are uploaded — the
     basenames are matched against the plan's destination basenames,
@@ -305,14 +338,18 @@ def install(
     src_dir = os.path.abspath(src_dir)
     plan = _plan_uploads(src_dir)
     if not plan:
-        raise RuntimeError("no .py files found under {}".format(src_dir))
+        raise RuntimeError("no .py/.mpy files found under {}".format(src_dir))
 
     if files is not None:
-        wanted = set(files)
-        plan = [(s, d) for (s, d) in plan if os.path.basename(d) in wanted]
+        # Match by module name, not literal basename: a bundle that
+        # dedupes a module to its .mpy (see _dedupe_by_module) would
+        # otherwise silently drop a files=["mod.py"] request that no
+        # longer has a literal "mod.py" entry in the plan.
+        wanted = {_module_name(f) for f in files}
+        plan = [(s, d) for (s, d) in plan if _module_name(os.path.basename(d)) in wanted]
         if not plan:
             raise RuntimeError(
-                "requested files not found in bundle: {}".format(sorted(wanted))
+                "requested files not found in bundle: {}".format(sorted(files))
             )
 
     # Which root-level basenames are in the plan? boot.py backup

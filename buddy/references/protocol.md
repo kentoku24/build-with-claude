@@ -98,7 +98,7 @@ keys: ['entries', 'msg', 'running', 'tokens', 'tokens_today', 'total', 'waiting'
 Claude.app's heartbeat contains **no** quota/utilization/limit/reset
 field, and the device is BLE-only so it can't query usage itself. The
 on-device "5h / Week / 3rd" bars are instead fed by a host companion,
-`scripts/quota_push.py` (backed by `codexbar --provider anthropic
+`scripts/quota_push.py` (backed by `codexbar --provider claude
 --format json`), which writes extra heartbeat fields:
 
 ```

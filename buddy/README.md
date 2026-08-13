@@ -23,7 +23,7 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 ## Quota bars (BLE companion)
 
-The **5h / Week** bars plus a **configurable 3rd bar** show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider anthropic --format json` and writes `five_h_util` / `week_util` / `bar3_util` heartbeats to the device, which renders `100 − utilization` for each.
+The **5h / Week** bars plus a **configurable 3rd bar** show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider claude --format json` and writes `five_h_util` / `week_util` / `bar3_util` heartbeats to the device, which renders `100 − utilization` for each.
 
 The **3rd bar is a generic name + value slot** — the device draws whatever `bar3_label` the host sends. By default the companion points it at a codexbar *extra-rate window* (`usage.extraRateWindows`, e.g. **"Daily Routines"**, which replaced the old Sonnet window in the codexbar GUI). Retarget or rename it without re-flashing:
 
@@ -42,7 +42,7 @@ The **bar length** is remaining quota; the **bar colour** reflects the codexbar 
 ```bash
 pip install bleak          # BLE central library
 # codexbar must be on PATH and authenticated:
-codexbar --provider anthropic --format json   # should print usage JSON
+codexbar --provider claude --format json   # should print usage JSON
 ```
 
 Preview the numbers any time without a device or Bluetooth:

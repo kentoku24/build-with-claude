@@ -7,7 +7,7 @@ it reads the quota from **codexbar** and writes, per heartbeat, a bar
 length and a bar colour for each window to the device's Nordic-UART RX
 characteristic, so the bars track the real account quota.
 
-Backend: `codexbar --provider anthropic --format json`. Its first array
+Backend: `codexbar --provider claude --format json`. Its first array
 entry has `usage.{primary, secondary}.usedPercent` (the bar length) and
 `pace.{primary, secondary}.stage` (which we turn into a colour here,
 host-side):
@@ -29,8 +29,9 @@ bars, so it must be installed either way). Older codexbar builds with a
 Sonnet `usage.tertiary` window are used as a last-resort fallback.
 
 The full codexbar response shape (usage + pace, stage enum, guards) is
-documented in buddy/references/codexbar-pace.md — pace only exists in
-steipete/CodexBar#1722, so that file is our record of what we parse here.
+documented in buddy/references/codexbar-pace.md — the released CLI
+(verified v0.48.0) provides pace with `--provider claude`, and this file
+is our captured, verified record of the shape we parse here.
 
 (Mapping verified against the labeled usage API: primary==five_hour,
 secondary==seven_day.) `<name>_util` gives the device its bar length
@@ -66,7 +67,7 @@ reconnect from Claude.app for the approval workflow.
 ### Requirements
 
     pip install bleak                # BLE central for macOS/Linux/Windows
-    codexbar on PATH, authenticated  # `codexbar --provider anthropic --format json`
+    codexbar on PATH, authenticated  # `codexbar --provider claude --format json`
 
 ### Usage
 
@@ -95,14 +96,12 @@ import subprocess
 import sys
 
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-# Which codexbar binary to shell out to. `pace` (the bar-colour + expected
-# tick source) only exists in builds carrying steipete/CodexBar#1722, which
-# isn't in the released CLI yet — set CODEXBAR_BIN to a from-source build of
-# that PR (e.g. .../CodexBar/.build/release/CodexBarCLI) to get it. Defaults
-# to plain `codexbar` on PATH (no pace -> bars colour by remaining-% only,
-# no expected tick).
+# Which codexbar binary to shell out to. `CODEXBAR_BIN` optionally
+# overrides it (e.g. to test a local build); the released CLI (v0.48.0+)
+# already provides pace with `--provider claude`, so the default
+# `codexbar` on PATH is fine.
 CODEXBAR_BIN = os.environ.get("CODEXBAR_BIN", "codexbar")
-CODEXBAR_CMD = [CODEXBAR_BIN, "--provider", "anthropic", "--format", "json"]
+CODEXBAR_CMD = [CODEXBAR_BIN, "--provider", "claude", "--format", "json"]
 DEFAULT_NAME_PREFIX = "Claude_"
 DEFAULT_INTERVAL = 60
 
@@ -230,8 +229,8 @@ def _read_codexbar(bar3_id=None, bar3_label=None, bar3_value=None):
     except FileNotFoundError:
         raise SystemExit(
             "codexbar binary not found: %r. Install it (e.g. `brew install codexbar`) "
-            "or set CODEXBAR_BIN to a build, and make sure "
-            "`%s --provider anthropic --format json` works." % (CODEXBAR_BIN, CODEXBAR_BIN)
+            "or set CODEXBAR_BIN to a different binary, and make sure "
+            "`%s --provider claude --format json` works." % (CODEXBAR_BIN, CODEXBAR_BIN)
         )
     except subprocess.TimeoutExpired:
         raise SystemExit("codexbar timed out.")
