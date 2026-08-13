@@ -54,7 +54,8 @@ to size 4 for cross-room readability.
     y=0..20    header ("Claude Buddy" + status)
     y=24       "5h" quota bar     (100 - five_h_util; expected-pace tick)
     y=48       "Week" quota bar   (100 - week_util; expected-pace tick)
-    y=72       "Sonnet" quota bar (100 - sonnet_util; hidden while a prompt is up)
+    y=72       3rd quota bar      (host-named via bar3_label; 100 - bar3_util;
+                                   hidden while a prompt is up)
     y=74..108  prompt box (when a permission is pending)
     y=112..134 hint strip (Y once / N deny / Q exit columns)
 
@@ -96,6 +97,12 @@ _LCD = M5.Lcd
 
 _W = 240
 _H = 135
+
+# Label shown on the 3rd (generic) quota bar when the host hasn't sent a
+# bar3_label — e.g. the Claude.app link, which carries no quota at all. The
+# real name arrives in bar3_label (e.g. "Daily Routines"); keep this ASCII
+# and short, since the bar row only has DejaVu9 (size 1) room for the label.
+_BAR3_DEFAULT_LABEL = "Bar 3"
 
 # ---- quota-bar shimmer
 #
@@ -161,18 +168,23 @@ _GLINT_PROFILE = _build_glint_profile(_GLINT_W, _GLINT_SLICE, _GLINT_CORE)
 # The device is BLE-only (claude_buddy.py takes WiFi down for radio
 # coexistence) so it can't query usage itself — the host companion
 # (scripts/quota_push.py, backed by `codexbar`) sends, per heartbeat:
-#   five_h_util / week_util / sonnet_util   - utilization % (0..100, "used")
+#   five_h_util / week_util / bar3_util     - utilization % (0..100, "used")
 #                                             -> bar length = 100 - util
-#   five_h_color / week_color / sonnet_color - RGB int -> bar fill colour
+#   five_h_color / week_color / bar3_color  - RGB int -> bar fill colour
+#   bar3_label                              - the 3rd bar's arbitrary name
+#                                             (e.g. "Daily Routines"); the
+#                                             device draws it verbatim, so the
+#                                             3rd bar is a generic name+value
+#                                             slot rather than a fixed window
 #   five_h_expected / week_expected          - even-burn baseline % (a *used*
 #                                             %) -> expected-pace tick position
 #   five_h_expected_color / week_expected_color - RGB int -> tick colour
 # The host derives the colour from the codexbar pace stage (and a
 # remaining-% fallback for windows with no pace); the device just paints
 # it. Keeping the stage->colour map host-side means colours can be retuned
-# without re-flashing. The expected tick (5h / Week only — Sonnet has no
-# pace) marks CodexBar's expectedUsedPercent: green where you're under the
-# baseline (in reserve), red where you're over it (in deficit).
+# without re-flashing. The expected tick (5h / Week only — the generic 3rd
+# bar carries no pace) marks CodexBar's expectedUsedPercent: green where
+# you're under the baseline (in reserve), red where you're over it (in deficit).
 #
 # Claude.app's own heartbeat carries none of these, so on that link the
 # bars read "--". See buddy/references/protocol.md.
@@ -334,7 +346,7 @@ class BuddyUI:
 
     def update_identity(self, name: str, owner: str):
         # The connected layout no longer renders an identity band — that
-        # row is reused for the Sonnet bar, and the header already shows
+        # row is reused for the 3rd quota bar, and the header already shows
         # "Claude Buddy". Just remember the values.
         self._identity_name = name or "Buddy"
         self._identity_owner = owner or ""
@@ -548,7 +560,7 @@ class BuddyUI:
         a used-% maps to x = 6 + bar_w*(100-expected)/100: the tick lands
         inside the fill when actual used < expected (in reserve) and on the
         gray remainder when used > expected (in deficit) — which is why the
-        host colours it green vs red. Both None -> no tick (e.g. Sonnet).
+        host colours it green vs red. Both None -> no tick (e.g. the 3rd bar).
 
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
@@ -562,6 +574,15 @@ class BuddyUI:
         """
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
+        # The 3rd bar's label is host-supplied (bar3_label) and arbitrary, so
+        # defend like _draw_prompt_box does for host text: coerce to str (a
+        # malformed numeric label would otherwise hit drawString) and truncate
+        # to the label area — x=6 up to the pct slot at _W-38, with a small gap
+        # — so a long name can't overrun the bar or collide with the right-
+        # aligned pct. Fixed "5h"/"Week" labels never reach the loop.
+        label = str(label)
+        while _LCD.textWidth(label) > _W - 46 and len(label) > 1:
+            label = label[:-1]
         _LCD.drawString(label, 6, y)
         # Clear a 36 px slot at the right edge for the pct label so that
         # a shorter string ("9%" / "--") always overwrites a longer one ("100%").
@@ -597,13 +618,13 @@ class BuddyUI:
         return bar_y, fill_w, marker
 
     def _data_pcts(self):
-        """Return (h5, wk, sonnet) remaining % (0..100), each None if unknown.
+        """Return (h5, wk, bar3) remaining % (0..100), each None if unknown.
 
-        `five_h_util` / `week_util` / `sonnet_util` are utilization
+        `five_h_util` / `week_util` / `bar3_util` are utilization
         percentages (0..100, "used") the companion sends from `codexbar`
-        (primary / secondary / tertiary). We display *remaining*, i.e.
-        100 - utilization. An absent field yields None — that bar renders a
-        "--" no-data state rather than a fabricated number.
+        (5-hour / 7-day-all / a configurable 3rd window). We display
+        *remaining*, i.e. 100 - utilization. An absent field yields None —
+        that bar renders a "--" no-data state rather than a fabricated number.
         """
         hb = self._last
 
@@ -611,21 +632,23 @@ class BuddyUI:
             v = hb.get(key)
             return None if v is None else max(0, min(100, 100 - int(v)))
 
-        return _rem("five_h_util"), _rem("week_util"), _rem("sonnet_util")
+        return _rem("five_h_util"), _rem("week_util"), _rem("bar3_util")
 
     def _draw_data_rows(self):
         """Update the quota bars in-place without clearing the full content
         area, so the screen never goes black between heartbeats.
 
-        Three rows (5h / Week / Sonnet) at y=24/48/72 — the identity band
+        Three rows (5h / Week / 3rd) at y=24/48/72 — the identity band
         was dropped to make vertical room. A pending prompt occupies the
-        Sonnet row's space (prompt box y=74..108), so we hide Sonnet then.
+        3rd row's space (prompt box y=74..108), so we hide the 3rd bar then.
 
         Bar length is remaining quota; bar colour is whatever the host sent
         (`*_color`, derived from the codexbar pace stage on the Mac side).
+        The 3rd bar's label is host-supplied (`bar3_label`) so it can show an
+        arbitrary window name (e.g. "Daily Routines") rather than a fixed one.
         """
         hb = self._last
-        h5, wk, snt = self._data_pcts()
+        h5, wk, b3 = self._data_pcts()
         bars = []
         c5 = self._bar_color(hb.get("five_h_color"))
         by, fw, mk = self._draw_bar("5h", h5, 24, c5,
@@ -638,14 +661,15 @@ class BuddyUI:
                                     hb.get("week_expected_color"))
         bars.append({"bar_y": by, "fill_w": fw, "color": cw, "marker": mk})
         if self._prompt:
-            # The prompt box (y=74..108) takes the Sonnet row — don't animate
-            # a bar that isn't drawn. 5h/Week stay live above it.
+            # The prompt box (y=74..108) takes the 3rd bar's row — don't
+            # animate a bar that isn't drawn. 5h/Week stay live above it.
             self._draw_prompt_box(self._prompt)
         else:
-            cs = self._bar_color(hb.get("sonnet_color"))
-            # Sonnet (tertiary) has no pace, so no expected tick.
-            by, fw, mk = self._draw_bar("Sonnet", snt, 72, cs)
-            bars.append({"bar_y": by, "fill_w": fw, "color": cs, "marker": mk})
+            c3 = self._bar_color(hb.get("bar3_color"))
+            label3 = hb.get("bar3_label") or _BAR3_DEFAULT_LABEL
+            # The 3rd bar is a generic name+value slot — no pace, so no tick.
+            by, fw, mk = self._draw_bar(label3, b3, 72, c3)
+            bars.append({"bar_y": by, "fill_w": fw, "color": c3, "marker": mk})
         # Replacing the list (vs mutating) means a fresh solid fill was just
         # painted under every bar, so any in-flight glint is already gone and
         # tick_anim restarts cleanly on its next frame.
