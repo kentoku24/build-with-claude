@@ -1,24 +1,24 @@
 # codexbar JSON response — `usage` + `pace` reference
 
-`scripts/quota_push.py` reads `codexbar --provider anthropic --format json`
+`scripts/quota_push.py` reads `codexbar --provider claude --format json`
 to drive the device's quota bars. The **`pace`** part of that response is
-new and barely documented upstream — it landed in
-[steipete/CodexBar#1722](https://github.com/steipete/CodexBar/pull/1722) —
-so this file is our captured, verified record of the shape we depend on.
+provided by the released CLI (verified on codexbar v0.48.0) and barely
+documented upstream — so this file is our captured, verified record of the
+shape we depend on.
 
 - **Captured from:** codexbar `version` `2.1.186` (the `version` field is in
   each entry — check it if the shape below ever stops matching).
 - **Upstream source of truth:** `Sources/CodexBarCore/UsagePace.swift`
   (`UsagePace.weekly(...)`, `stage(for:)`), `Sources/CodexBarCLI/CLIRenderer.swift`
   (formatting / JSON), `Sources/CodexBarCLI/CLIPayloads.swift` (`PacePayload`).
-- **Stability:** unofficial / pre-merge. Treat field presence defensively.
+- **Stability:** unofficial / under-documented upstream. Treat field presence defensively.
 
 ---
 
 ## Command & top-level shape
 
 ```bash
-codexbar --provider anthropic --format json    # `usage` subcommand is the default
+codexbar --provider claude --format json    # `usage` subcommand is the default
 ```
 
 Returns a JSON **array**; we read element `[0]`. Each entry:
