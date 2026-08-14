@@ -99,6 +99,37 @@ def check_bounds(phase):
     return not bad
 
 
+def check_column_bounds(phase, x_lo, x_hi):
+    """Column-scoped bounds for the data-rows phase (y in 28..121): any draw
+    whose x falls in [x_lo, x_hi) must not cross x_hi.
+
+    This catches a left-column pct label painted over the right column — the
+    full-screen check_bounds can't. Scoping to the bar rows (y 28..121)
+    keeps screen-wide draws out of the way: the header icon (~x=300 at y=5)
+    and the battery fill (x=247 at y=183) would otherwise false-flag.
+    """
+    bad = []
+    for name, args in LCD.calls:
+        if name in ("fillRect", "drawRect"):
+            x, y, w, _ = args[0], args[1], args[2], args[3]
+        elif name == "drawString":
+            s, x, y = args[0], args[1], args[2]
+            w = LCD.textWidth(s)
+        else:
+            continue
+        if not (x_lo <= x < x_hi):
+            continue
+        if not (28 <= y <= 121):
+            continue
+        if x + w > x_hi:
+            bad.append("%s%s" % (name, args))
+            print("FAIL %s: column [%d,%d) overrun %s%s"
+                  % (phase, x_lo, x_hi, name, args))
+    for b in bad:
+        failures.append(b)
+    return not bad
+
+
 # ---- phase a: surface + tick_idle_burst ----
 clear_calls()
 u = ui.BuddyUI()
@@ -129,55 +160,100 @@ u.set_connection("encrypted")
 check_bounds("set_connection")
 print("PASS set_connection")
 
-# ---- phase d: reserve marker case + exact hb-drawn ----
+# ---- phase d: Go-absent heartbeat + exact hb-drawn + left marker ----
 clear_calls()
 buf = StringIO()
 old_stdout = sys.stdout
 sys.stdout = buf
 try:
     u.update_heartbeat({
-        "five_h_util": 13, "five_h_color": 0x00FF00,
+        "five_h_util": 13,
         "five_h_expected": 27, "five_h_expected_color": 0x00FF00,
-        "week_util": 13, "week_color": 0x00FF00,
-        "sonnet_util": 6, "sonnet_color": 0x00FF00,
+        "week_util": 13,
+        "bar3_util": 6, "bar3_label": "Routines",
     })
 finally:
     sys.stdout = old_stdout
 out = buf.getvalue()
-exp = "hb-drawn 5h=87 week=87 sonnet=94 tick5h=27 tickweek=-\n"
+exp = ("hb-drawn 5h=87 week=87 bar3=94 go5h=-- gowk=-- gomo=-- "
+       "tick5h=27 tickweek=-\n")
 check(out == exp, "hb-drawn mismatch: got %r want %r" % (out, exp))
 marks = [c for c in LCD.calls if c[0] == "fillRect" and c[1][2] == 4]
 check(len(marks) == 1, "expected exactly one 4px marker, got %d" % len(marks))
 mx = marks[0][1][0] + 1
-check(mx == 230, "reserve marker mx=%d != 230" % mx)
-check_bounds("reserve")
-print("PASS reserve marker")
+check(mx == 115, "go-absent marker mx=%d != 115" % mx)
+strings = [c[1][0] for c in LCD.calls if c[0] == "drawString"]
+for lab in ("5h", "Week", "Routines", "Go5h", "GoWk", "GoMo"):
+    check(lab in strings, "go-absent phase missing label %r" % lab)
+check_bounds("go-absent")
+check_column_bounds("go-absent", 6, 156)
+check_column_bounds("go-absent", 164, 314)
+print("PASS go-absent 6-bar")
 
-# ---- phase e: deficit marker case + exact hb-drawn ----
+# ---- phase e: full 6-field heartbeat + exact hb-drawn ----
 clear_calls()
 buf = StringIO()
 old_stdout = sys.stdout
 sys.stdout = buf
 try:
     u.update_heartbeat({
-        "five_h_util": 31, "five_h_color": 0xFFFF00,
+        "five_h_util": 13,
         "five_h_expected": 27, "five_h_expected_color": 0x00FF00,
-        "week_util": 13, "week_color": 0x00FF00,
-        "sonnet_util": 6, "sonnet_color": 0x00FF00,
+        "week_util": 13,
+        "bar3_util": 6, "bar3_label": "Routines",
+        "go5h_util": 10, "go5h_color": 0x00FF00,
+        "gowk_util": 16, "gowk_color": 0xFFAA00,
+        "gomo_util": 5, "gomo_color": 0x00FF00,
     })
 finally:
     sys.stdout = old_stdout
 out = buf.getvalue()
-exp = "hb-drawn 5h=69 week=87 sonnet=94 tick5h=27 tickweek=-\n"
+exp = ("hb-drawn 5h=87 week=87 bar3=94 go5h=90 gowk=84 gomo=95 "
+       "tick5h=27 tickweek=-\n")
 check(out == exp, "hb-drawn mismatch: got %r want %r" % (out, exp))
 marks = [c for c in LCD.calls if c[0] == "fillRect" and c[1][2] == 4]
 check(len(marks) == 1, "expected exactly one 4px marker, got %d" % len(marks))
 mx = marks[0][1][0] + 1
-check(mx == 230, "deficit marker mx=%d != 230" % mx)
-check_bounds("deficit")
-print("PASS deficit marker")
+check(mx == 115, "full marker mx=%d != 115" % mx)
+check_bounds("full-6-field")
+check_column_bounds("full-6-field", 6, 156)
+check_column_bounds("full-6-field", 164, 314)
+print("PASS full 6-field")
 
-# ---- phase f: footer BAT bar ----
+# ---- phase f: prompt pending hides BOTH 3rd-row bars ----
+clear_calls()
+buf = StringIO()
+old_stdout = sys.stdout
+sys.stdout = buf
+try:
+    u.update_heartbeat({
+        "five_h_util": 13,
+        "week_util": 13,
+        "bar3_util": 6, "bar3_label": "Routines",
+        "go5h_util": 10, "gowk_util": 16, "gomo_util": 5,
+        "prompt": {"tool": "Bash", "hint": "Allow this?"},
+    })
+finally:
+    sys.stdout = old_stdout
+out = buf.getvalue()
+exp = ("hb-drawn 5h=87 week=87 bar3=94 go5h=90 gowk=84 gomo=95 "
+       "tick5h=- tickweek=-\n")
+check(out == exp, "hb-drawn mismatch: got %r want %r" % (out, exp))
+strings = [c[1][0] for c in LCD.calls if c[0] == "drawString"]
+check("Go5h" in strings and "GoWk" in strings,
+      "prompt phase lost Go5h/GoWk")
+check("Routines" not in strings,
+      "prompt phase still drew the bar3 label")
+check("GoMo" not in strings,
+      "prompt phase still drew GoMo")
+check(("drawRect", (3, 104, _W - 6, 64, ui.ORANGE)) in LCD.calls,
+      "prompt box missing")
+check_bounds("prompt")
+check_column_bounds("prompt", 6, 156)
+check_column_bounds("prompt", 164, 314)
+print("PASS prompt-hidden")
+
+# ---- phase g: footer BAT bar ----
 clear_calls()
 u.update_footer({"lvl": 1, "appr": 2, "deny": 0},
                 {"pct": 10, "mV": 0, "mA": 0, "usb": True})
