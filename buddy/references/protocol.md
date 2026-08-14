@@ -146,14 +146,18 @@ should be short ASCII — the bar row only has room for a DejaVu9 (size 1)
 string before the bar.
 
 The `*_color` values are **plain RGB ints the device paints directly** —
-no colour logic on the device. The companion resolves them host-side from
-the codexbar **pace stage** (`farBehind`…`farAhead`; see
+no colour logic on the device. The **bar fill** is now a fixed provider
+**brand colour**: `0xCC785C` (Anthropic orange) for the left-column Claude
+bars (`five_h_color` / `week_color` / `bar3_color`) and `0x4D6BFE`
+(DeepSeek blue) for the right-column Go bars (`go5h_color` / `gowk_color` /
+`gomo_color`). Only the `*_expected_color` fields (5h/Week's expected-pace
+tick) remain pace-derived: the companion resolves them host-side from the
+codexbar **pace stage** (`farBehind`…`farAhead`; see
 [codexbar-pace.md](codexbar-pace.md) for the full response spec) on a
-green→red ramp
-(`*Behind`/reserve = green … `*Ahead`/deficit = red), with a remaining-%
-fallback where there's no stage (the 3rd bar always; 5h/Week when codexbar
-omits pace early in a window). Keeping the stage→colour map on the host
-means colours can be retuned without re-flashing the device. All these
+green→red ramp (`*Behind`/reserve = green … `*Ahead`/deficit = red, yellow
+on pace), with a remaining-% fallback where there's no stage (5h/Week when
+codexbar omits pace early in a window). Keeping the stage→colour map on the
+host means colours can be retuned without re-flashing the device. All these
 names are in the device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
 `buddy_protocol.py`) so a quota-only message is recognized as a heartbeat.
 The device-basic bundle recognises the same `bar3_*` and `go*` fields: its

@@ -141,6 +141,16 @@ _STAGE_COLORS = {
     "farAhead":       0xFF0000,  # red    — heavy deficit
 }
 
+# Bar-fill brand colours (RGB int 0xRRGGBB). Unlike the pace ramp, the bar
+# fill is now the provider's brand colour so the columns read as
+# "Claude/Anthropic" and "OpenCode Go" at a glance. 0xCC785C is the same
+# Anthropic orange the device-basic UI theme already uses; 0x4D6BFE is
+# DeepSeek's brand blue (OpenCode Go is powered by DeepSeek). The expected
+# pace tick still uses _line_color_for (green/red/yellow) — these constants
+# only drive the bar fill itself.
+_CLAUDE_BAR_COLOR = 0xCC785C  # Anthropic orange — fill for 5h / Week / 3rd (Claude) bars
+_GO_BAR_COLOR = 0x4D6BFE      # DeepSeek blue — fill for Go5h / GoWk / GoMo (OpenCode Go) bars
+
 
 def _color_for(util, stage):
     """Resolve a bar colour (RGB int) or None. Prefer the pace stage; else
@@ -349,12 +359,12 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None, no_go=False):
     fallback. All Go fields are omitted on any Go error — the Claude
     push always survives. `no_go=True` skips the Go fetch entirely.
 
-    e.g. {"five_h_util": 14, "five_h_color": 65280, "five_h_expected": 27,
+    e.g. {"five_h_util": 14, "five_h_color": 13397084, "five_h_expected": 27,
           "five_h_expected_color": 65280, "week_util": 13,
-          "week_color": 16755200, "bar3_label": "Daily Routines",
-          "bar3_util": 0, "bar3_color": 65280, "go5h_util": 1,
-          "go5h_color": 65280, "gowk_util": 3, "gowk_color": 65280,
-          "gomo_util": 16, "gomo_color": 65280}
+          "week_color": 13397084, "bar3_label": "Daily Routines",
+          "bar3_util": 0, "bar3_color": 13397084, "go5h_util": 1,
+          "go5h_color": 5070846, "gowk_util": 3, "gowk_color": 5070846,
+          "gomo_util": 16, "gomo_color": 5070846}
     """
     raw = _read_codexbar(bar3_id, bar3_label, bar3_value)
     hb = {}
@@ -363,9 +373,9 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None, no_go=False):
         if util is None:
             continue
         hb[name + "_util"] = util
-        color = _color_for(util, stage)
-        if color is not None:
-            hb[name + "_color"] = color
+        # Bar fill is the provider brand colour (Anthropic orange); the
+        # expected-pace tick below keeps its green/red/yellow stage colours.
+        hb[name + "_color"] = _CLAUDE_BAR_COLOR
         # Expected-pace tick: only when codexbar gave us a baseline and a
         # classifiable stage (5h / Week only).
         if expected is not None:
@@ -374,27 +384,23 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None, no_go=False):
                 hb[name + "_expected"] = expected
                 hb[name + "_expected_color"] = line_color
     # The generic 3rd bar: a host-named (label, value) slot with no pace, so
-    # its colour uses the remaining-% fallback (_color_for with stage=None).
+    # it carries the Claude brand colour too.
     bar3 = raw.get("bar3")
     if bar3 is not None:
         label, util = bar3
         if util is not None:
             hb["bar3_label"] = label
             hb["bar3_util"] = util
-            color = _color_for(util, None)
-            if color is not None:
-                hb["bar3_color"] = color
-    # OpenCode Go windows: non-fatal, remaining-% colour only (no expected
-    # tick), all omitted on any error / when --no-opencode-go is set.
+            hb["bar3_color"] = _CLAUDE_BAR_COLOR
+    # OpenCode Go windows: non-fatal, DeepSeek-blue fill (no expected tick),
+    # all omitted on any error / when --no-opencode-go is set.
     go = _read_opencodego(no_go)
     for name in ("go5h", "gowk", "gomo"):
         util = go.get(name)
         if util is None:
             continue
         hb[name + "_util"] = util
-        color = _color_for(util, None)
-        if color is not None:
-            hb[name + "_color"] = color
+        hb[name + "_color"] = _GO_BAR_COLOR
     return hb
 
 
@@ -476,8 +482,7 @@ def main(argv=None):
         for name, label in (("five_h", "5h"), ("week", "Week")):
             util, stage, expected = raw[name]
             rem = "--" if util is None else "%d%%" % (100 - util)
-            color = _color_for(util, stage)
-            color_s = "n/a" if color is None else "0x%06X" % color
+            color_s = "n/a" if util is None else "0x%06X" % _CLAUDE_BAR_COLOR
             if expected is None:
                 exp_s = "--"
             else:
@@ -495,8 +500,7 @@ def main(argv=None):
             why = "no source" if bar3 is None else "%r has no value" % bar3[0]
             print("%-14s: -- (not pushed; %s)" % ("3rd bar", why))
         else:
-            color = _color_for(b_util, None)
-            color_s = "n/a" if color is None else "0x%06X" % color
+            color_s = "0x%06X" % _CLAUDE_BAR_COLOR
             print("%-14s: %d%% remaining  stage=%-13s color=%s  expected=%s" % (
                 bar3[0], 100 - b_util, "n/a", color_s, "--"))
         # OpenCode Go rows (non-fatal, no expected tick). Mirror fetch_quota:
@@ -506,8 +510,7 @@ def main(argv=None):
             util = go.get(name)
             if util is None:
                 continue
-            color = _color_for(util, None)
-            color_s = "n/a" if color is None else "0x%06X" % color
+            color_s = "0x%06X" % _GO_BAR_COLOR
             print("%-14s: %d%% remaining  stage=%-13s color=%s  expected=%s" % (
                 label, 100 - util, "n/a", color_s, "--"))
         if not any(go.get(n) is not None for n in ("go5h", "gowk", "gomo")):
