@@ -40,10 +40,16 @@ to bump the passkey to size 4 for cross-room readability.
 
   Connected with heartbeat (no identity band — reused for a 3rd bar):
     y=0..20    header ("Claude Buddy" + status)
-    y=28       "5h" quota bar     (100 - five_h_util; expected-pace tick)
-    y=64       "Week" quota bar   (100 - week_util; expected-pace tick)
-    y=100      "Sonnet" quota bar (100 - sonnet_util; hidden while a
-                                   prompt is up)
+    Six quota bars in two columns (left x=6 w=150, right x=164 w=150),
+    rows y=28/64/100:
+    y=28       "5h" quota bar      (100 - five_h_util; expected-pace tick)
+               "Go5h" quota bar    (100 - go5h_util; OpenCode Go, no tick)
+    y=64       "Week" quota bar    (100 - week_util; expected-pace tick)
+               "GoWk" quota bar    (100 - gowk_util; OpenCode Go, no tick)
+    y=100      "<bar3_label>" quota bar (100 - bar3_util; host-named,
+               no tick; hidden while a prompt is up)
+               "GoMo" quota bar    (100 - gomo_util; OpenCode Go, no tick;
+               hidden while a prompt is up)
     y=104..168 prompt box (when a permission is pending)
     y=182      stats footer + level-coloured battery bar
     y=216..240 hint strip (A once / B deny / C exit)
@@ -93,7 +99,12 @@ _H = 240
 # leaning on fps for a slow, smooth glide.
 #
 # Geometry mirrors _draw_bar exactly: bars start at x=6 and are _BAR_W wide.
-_BAR_W = _W - 12             # 308 — must match _draw_bar's bar_w
+# The two-column layout passes per-bar x/bar_w; _BAR_W stays as the
+# full-width default (and _GLINT_TRAVEL's source) for compatibility.
+_BAR_W = _W - 12             # 308 — must match _draw_bar's default bar_w
+_COL_X = 6                   # left column origin (5h / Week / bar3)
+_COL2_X = 164                # right column origin (Go5h / GoWk / GoMo)
+_COL_W = 150                 # each column's bar width
 _GLINT_W = 40                # highlight band width (px) — wider = gentler ramp
 _GLINT_SLICE = 2             # band drawn as slices this wide (smaller = finer)
 _GLINT_STEP = 3              # band travel per frame (px) — smaller = slower glide
@@ -136,21 +147,27 @@ def _build_glint_profile(width, slice_w, core):
 
 _GLINT_PROFILE = _build_glint_profile(_GLINT_W, _GLINT_SLICE, _GLINT_CORE)
 
-# Usage bars render the *real* Claude quota, which only the host knows.
+# Usage bars render the *real* quota, which only the host knows.
 # The device is BLE-only so it can't query usage itself — the host companion
 # (scripts/quota_push.py, backed by `codexbar`) sends, per heartbeat:
-#   five_h_util / week_util / sonnet_util   - utilization % (0..100, "used")
+#   five_h_util / week_util / bar3_util      - utilization % (0..100, "used")
 #                                             -> bar length = 100 - util
-#   five_h_color / week_color / sonnet_color - RGB int -> bar fill colour
+#   five_h_color / week_color / bar3_color   - RGB int -> bar fill colour
+#   bar3_label                               - host-supplied name for the
+#                                             3rd bar (default "Bar 3")
 #   five_h_expected / week_expected          - even-burn baseline % (a *used*
 #                                             %) -> expected-pace tick position
 #   five_h_expected_color / week_expected_color - RGB int -> tick colour
+#   go5h_util / gowk_util / gomo_util        - OpenCode Go windows (5h / week /
+#                                             month) utilization %; no ticks
+#   go5h_color / gowk_color / gomo_color     - RGB int -> bar fill colour
 # The host derives the colour from the codexbar pace stage (and a
 # remaining-% fallback for windows with no pace); the device just paints
 # it. Keeping the stage->colour map host-side means colours can be retuned
-# without re-flashing. The expected tick (5h / Week only — Sonnet has no
-# pace) marks CodexBar's expectedUsedPercent: green where you're under the
-# baseline (in reserve), red where you're over it (in deficit).
+# without re-flashing. The expected tick (5h / Week only — the 3rd and Go
+# bars have no pace) marks CodexBar's expectedUsedPercent: green where
+# you're under the baseline (in reserve), red where you're over it (in
+# deficit).
 #
 # Claude.app's own heartbeat carries none of these, so on that link the
 # bars read "--". See buddy/references/protocol.md.
@@ -176,6 +193,15 @@ def _set_font_auto(text: str) -> int:
 def _right(y: int, pad: int, text: str) -> int:
     """Cursor X so `text` ends `pad` px from the right edge."""
     return _W - pad - _LCD.textWidth(text)
+
+
+def _right_in(right_edge: int, pad: int, text: str) -> int:
+    """Cursor X so `text` ends `pad` px from `right_edge` (column-local).
+
+    Per-column right alignment for the quota bars — the screen-wide `_right`
+    would push a right-column pct label off toward the screen edge.
+    """
+    return right_edge - pad - _LCD.textWidth(text)
 
 
 def _center(text: str) -> int:
@@ -304,13 +330,13 @@ class BuddyUI:
             self._draw_main()
         if curr_pending != prev_pending:
             self.restore_button_hints()
-        five_h_remaining = self._clamped_remaining(hb, "five_h_util")
-        week_remaining = self._clamped_remaining(hb, "week_util")
-        sonnet_remaining = self._clamped_remaining(hb, "sonnet_util")
         tick5h = "-" if "five_h_expected" not in hb else hb["five_h_expected"]
         tickweek = "-" if "week_expected" not in hb else hb["week_expected"]
-        print("hb-drawn 5h=%d week=%d sonnet=%d tick5h=%s tickweek=%s" % (
-            five_h_remaining, week_remaining, sonnet_remaining, tick5h, tickweek))
+        print("hb-drawn 5h=%s week=%s bar3=%s go5h=%s gowk=%s gomo=%s tick5h=%s tickweek=%s" % (
+            self._print_pct(hb, "five_h_util"), self._print_pct(hb, "week_util"),
+            self._print_pct(hb, "bar3_util"), self._print_pct(hb, "go5h_util"),
+            self._print_pct(hb, "gowk_util"), self._print_pct(hb, "gomo_util"),
+            tick5h, tickweek))
 
     @staticmethod
     def _clamped_remaining(hb: dict, key: str) -> int:
@@ -320,9 +346,22 @@ class BuddyUI:
             return 0
         return max(0, min(100, 100 - int(v)))
 
+    @staticmethod
+    def _print_pct(hb: dict, key: str) -> str:
+        """Remaining % as drawn, for the serial diagnostic: "--" when the
+        key is absent (the panel shows "--" too), else the clamped remaining.
+
+        Unlike _clamped_remaining (0 for absent), the "--" sentinel keeps the
+        serial line honest: a missing window must never read as "fully used!"
+        """
+        v = hb.get(key)
+        if v is None:
+            return "--"
+        return str(max(0, min(100, 100 - int(v))))
+
     def update_identity(self, name: str, owner: str):
         # The connected layout no longer renders an identity band — that
-        # row is reused for the Sonnet bar, and the header already shows
+        # row is reused for the 3rd quota bar, and the header already shows
         # "Claude Buddy". Just remember the values.
         self._identity_name = name or "Buddy"
         self._identity_owner = owner or ""
@@ -492,7 +531,7 @@ class BuddyUI:
         _LCD.fillRect(mx, bar_y, 2, 8, color)
 
     def _draw_bar(self, label: str, pct, y: int, color: int,
-                  expected=None, line_color=None):
+                  expected=None, line_color=None, x=6, bar_w=None):
         """Draw a labeled horizontal progress bar showing remaining quota.
 
         pct is the *remaining* percentage (0..100); pct=100 means the bar is
@@ -500,12 +539,19 @@ class BuddyUI:
         label rather than inventing a number. `color` is the fill colour,
         chosen by the caller (pace stage, or remaining-% fallback).
 
+        `x` / `bar_w` place the bar in a column (two columns of three on this
+        panel): the label, the pct clear-slot, the pct right-align, the bar
+        fills and the expected-pace marker all derive from them.
+
         `expected` (a *used* %, 0..100) and `line_color` add CodexBar's
         expected-pace tick. Because the bar fills *remaining* from the left,
-        a used-% maps to x = 6 + bar_w*(100-expected)/100: the tick lands
+        a used-% maps to x = x + bar_w*(100-expected)/100: the tick lands
         inside the fill when actual used < expected (in reserve) and on the
         gray remainder when used > expected (in deficit) — which is why the
-        host colours it green vs red. Both None -> no tick (e.g. Sonnet).
+        host colours it green vs red. Both None -> no tick (e.g. the Go bars).
+
+        Long host-supplied labels (bar3_label) are truncated to the column so
+        they never collide with the pct slot.
 
         Draws the filled and empty portions of the bar in a single pass (no
         intermediate full-gray state) to avoid visible flicker on in-place
@@ -517,12 +563,19 @@ class BuddyUI:
         None — _draw_data_rows records the filled region for tick_anim's glint
         to sweep across, and the marker so the glint can repaint it.
         """
+        if bar_w is None:
+            bar_w = _W - 12
         _LCD.setTextSize(1)
         _LCD.setTextColor(GRAY_MID, BLACK)
-        _LCD.drawString(label, 6, y)
-        # Clear a 36 px slot at the right edge for the pct label so that
-        # a shorter string ("9%" / "--") always overwrites a longer one ("100%").
-        _LCD.fillRect(_W - 38, y, 32, 10, BLACK)
+        # Truncate long host-supplied labels; bar_w - 46 keeps the text clear
+        # of the pct slot at x + bar_w - 38.
+        while _LCD.textWidth(label) > bar_w - 46 and len(label) > 1:
+            label = label[:-1]
+        _LCD.drawString(label, x, y)
+        # Clear a 36 px slot at the column's right edge for the pct label so
+        # that a shorter string ("9%" / "--") always overwrites a longer one
+        # ("100%").
+        _LCD.fillRect(x + bar_w - 38, y, 32, 10, BLACK)
         if pct is None:
             pct_str = "--"
             fill_pct = 0
@@ -530,37 +583,39 @@ class BuddyUI:
             fill_pct = max(0, min(100, pct))
             pct_str = "{}%".format(fill_pct)
         _LCD.setTextColor(WHITE, BLACK)
-        _LCD.drawString(pct_str, _right(y, 6, pct_str), y)
+        _LCD.drawString(pct_str, _right_in(x + bar_w, 6, pct_str), y)
         bar_y = y + 13
-        bar_w = _W - 12
         fill_w = int(bar_w * fill_pct // 100)
         # Draw filled portion then empty portion in one pass — never shows
         # an intermediate all-gray state, so the bar updates without flash.
         if fill_w > 0:
-            _LCD.fillRect(6, bar_y, fill_w, 8, color)
+            _LCD.fillRect(x, bar_y, fill_w, 8, color)
         if fill_w < bar_w:
-            _LCD.fillRect(6 + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
+            _LCD.fillRect(x + fill_w, bar_y, bar_w - fill_w, 8, GRAY_DIM)
         # Expected-pace tick on top of the just-drawn fill/gray. Clamp so the
-        # 4 px-wide marker (1 px border each side) stays within [6, 6+bar_w).
+        # 4 px-wide marker (1 px border each side) stays within [x, x+bar_w).
         marker = None
         if expected is not None and line_color is not None:
-            mx = 6 + (bar_w * (100 - max(0, min(100, expected)))) // 100
-            if mx < 7:
-                mx = 7
-            elif mx > 6 + bar_w - 3:
-                mx = 6 + bar_w - 3
+            mx = x + (bar_w * (100 - max(0, min(100, expected)))) // 100
+            if mx < x + 1:
+                mx = x + 1
+            elif mx > x + bar_w - 3:
+                mx = x + bar_w - 3
             self._draw_marker(bar_y, mx, line_color)
             marker = (mx, line_color)
         return bar_y, fill_w, marker
 
     def _data_pcts(self):
-        """Return (h5, wk, sonnet) remaining % (0..100), each None if unknown.
+        """Return (h5, wk, bar3, go5h, gowk, gomo) remaining % (0..100),
+        each None if unknown.
 
-        `five_h_util` / `week_util` / `sonnet_util` are utilization
+        `five_h_util` / `week_util` / `bar3_util` are utilization
         percentages (0..100, "used") the companion sends from `codexbar`
-        (primary / secondary / tertiary). We display *remaining*, i.e.
-        100 - utilization. An absent field yields None — that bar renders a
-        "--" no-data state rather than a fabricated number.
+        (primary / secondary / tertiary), and `go5h_util` / `gowk_util` /
+        `gomo_util` are the OpenCode Go windows (5h / week / month). We
+        display *remaining*, i.e. 100 - utilization. An absent field yields
+        None — that bar renders a "--" no-data state rather than a
+        fabricated number.
         """
         hb = self._last
 
@@ -568,41 +623,68 @@ class BuddyUI:
             v = hb.get(key)
             return None if v is None else max(0, min(100, 100 - int(v)))
 
-        return _rem("five_h_util"), _rem("week_util"), _rem("sonnet_util")
+        return (_rem("five_h_util"), _rem("week_util"), _rem("bar3_util"),
+                _rem("go5h_util"), _rem("gowk_util"), _rem("gomo_util"))
 
     def _draw_data_rows(self):
         """Update the quota bars in-place without clearing the full content
         area, so the screen never goes black between heartbeats.
 
-        Three rows (5h / Week / Sonnet) at y=28/64/100 — the identity band
-        was dropped to make vertical room. A pending prompt occupies the
-        Sonnet row's space (prompt box y=104..168), so we hide Sonnet then.
+        Six bars in two columns of three: left (x=6) 5h / Week / host-named
+        bar3_label at y=28/64/100; right (x=164) Go5h / GoWk / GoMo at
+        y=28/64/100. The identity band was dropped to make vertical room.
+        A pending prompt occupies the third row's space (prompt box
+        y=104..168), so we hide both 3rd-row bars (bar3 + GoMo) then.
 
         Bar length is remaining quota; bar colour is whatever the host sent
         (`*_color`, derived from the codexbar pace stage on the Mac side).
         """
         hb = self._last
-        h5, wk, snt = self._data_pcts()
+        h5, wk, bar3, go5h, gowk, gomo = self._data_pcts()
         bars = []
         c5 = self._bar_color(hb.get("five_h_color"))
         by, fw, mk = self._draw_bar("5h", h5, 28, c5,
                                     hb.get("five_h_expected"),
-                                    hb.get("five_h_expected_color"))
-        bars.append({"bar_y": by, "fill_w": fw, "color": c5, "marker": mk})
+                                    hb.get("five_h_expected_color"),
+                                    x=_COL_X, bar_w=_COL_W)
+        bars.append({"bar_y": by, "fill_w": fw, "color": c5, "marker": mk,
+                     "x": _COL_X, "bar_w": _COL_W})
         cw = self._bar_color(hb.get("week_color"))
         by, fw, mk = self._draw_bar("Week", wk, 64, cw,
                                     hb.get("week_expected"),
-                                    hb.get("week_expected_color"))
-        bars.append({"bar_y": by, "fill_w": fw, "color": cw, "marker": mk})
+                                    hb.get("week_expected_color"),
+                                    x=_COL_X, bar_w=_COL_W)
+        bars.append({"bar_y": by, "fill_w": fw, "color": cw, "marker": mk,
+                     "x": _COL_X, "bar_w": _COL_W})
+        cg5 = self._bar_color(hb.get("go5h_color"))
+        # Go bars (OpenCode Go windows) carry no expected tick.
+        by, fw, mk = self._draw_bar("Go5h", go5h, 28, cg5,
+                                    x=_COL2_X, bar_w=_COL_W)
+        bars.append({"bar_y": by, "fill_w": fw, "color": cg5, "marker": mk,
+                     "x": _COL2_X, "bar_w": _COL_W})
+        cgw = self._bar_color(hb.get("gowk_color"))
+        by, fw, mk = self._draw_bar("GoWk", gowk, 64, cgw,
+                                    x=_COL2_X, bar_w=_COL_W)
+        bars.append({"bar_y": by, "fill_w": fw, "color": cgw, "marker": mk,
+                     "x": _COL2_X, "bar_w": _COL_W})
         if self._prompt:
-            # The prompt box (y=104..168) takes the Sonnet row — don't
-            # animate a bar that isn't drawn. 5h/Week stay live above it.
+            # The prompt box (y=104..168) takes both 3rd-row slots — don't
+            # animate bars that aren't drawn. 5h/Week/Go5h/GoWk stay live
+            # above it.
             self._draw_prompt_box(self._prompt)
         else:
-            cs = self._bar_color(hb.get("sonnet_color"))
-            # Sonnet (tertiary) has no pace, so no expected tick.
-            by, fw, mk = self._draw_bar("Sonnet", snt, 100, cs)
-            bars.append({"bar_y": by, "fill_w": fw, "color": cs, "marker": mk})
+            cb3 = self._bar_color(hb.get("bar3_color"))
+            # The host-named 3rd bar (bar3_label) has no pace, so no tick.
+            by, fw, mk = self._draw_bar(hb.get("bar3_label") or "Bar 3",
+                                        bar3, 100, cb3,
+                                        x=_COL_X, bar_w=_COL_W)
+            bars.append({"bar_y": by, "fill_w": fw, "color": cb3, "marker": mk,
+                         "x": _COL_X, "bar_w": _COL_W})
+            cgm = self._bar_color(hb.get("gomo_color"))
+            by, fw, mk = self._draw_bar("GoMo", gomo, 100, cgm,
+                                        x=_COL2_X, bar_w=_COL_W)
+            bars.append({"bar_y": by, "fill_w": fw, "color": cgm, "marker": mk,
+                         "x": _COL2_X, "bar_w": _COL_W})
         # Replacing the list (vs mutating) means a fresh solid fill was just
         # painted under every bar, so any in-flight glint is already gone and
         # tick_anim restarts cleanly on its next frame.
@@ -655,19 +737,19 @@ class BuddyUI:
         self._glint_was_active = active
 
         gx = None
-        if active:
-            travel = phase * _GLINT_STEP
-            if _GLINT_REVERSE:
-                gx = (6 + _BAR_W) - travel  # band enters from the right edge
-            else:
-                gx = (6 - _GLINT_W) + travel
+        travel = phase * _GLINT_STEP if active else None
         for bar in self._anim_bars:
             fw = bar["fill_w"]
             if fw <= 0:
                 bar["glint"] = None
                 continue
-            x0 = 6
-            x1 = 6 + fw
+            x0 = bar["x"]
+            x1 = bar["x"] + fw
+            if travel is not None:
+                if _GLINT_REVERSE:
+                    gx = (bar["x"] + bar["bar_w"] + _GLINT_W) - travel
+                else:
+                    gx = (bar["x"] - _GLINT_W) + travel
             by = bar["bar_y"]
             base = bar["color"]
             # New band span, clipped to the filled width (empty while resting
@@ -713,11 +795,11 @@ class BuddyUI:
         Walks the precomputed _GLINT_PROFILE (thin slices with a centre-bright
         quadratic falloff) and lightens the bar's base colour per slice, so the
         sheen is a smooth gradient rather than a few hard steps. Each slice is
-        clipped to [6, 6+fill_w) so the glint never spills onto the gray
+        clipped to [x, x+fill_w) so the glint never spills onto the gray
         remainder.
         """
-        x0 = 6
-        x1 = 6 + bar["fill_w"]
+        x0 = bar["x"]
+        x1 = bar["x"] + bar["fill_w"]
         by = bar["bar_y"]
         base = bar["color"]
         for off, w, frac in _GLINT_PROFILE:
@@ -731,8 +813,8 @@ class BuddyUI:
     def _draw_prompt_box(self, prompt: dict):
         # Orange-bordered box for the pending permission. y=104..168
         # gives us 64 px of height — two 10-px text rows with room to
-        # spare, clear of both the Sonnet bar above and the footer band
-        # (y=182..216) below.
+        # spare, clear of both the 3rd-row bars above (y=100, hidden
+        # while the prompt is up) and the footer band (y=182..216) below.
         _LCD.drawRect(3, 104, _W - 6, 64, ORANGE)
         _LCD.setTextSize(1)
         _LCD.setTextColor(ORANGE, BLACK)

@@ -97,9 +97,12 @@ keys: ['entries', 'msg', 'running', 'tokens', 'tokens_today', 'total', 'waiting'
 
 Claude.app's heartbeat contains **no** quota/utilization/limit/reset
 field, and the device is BLE-only so it can't query usage itself. The
-on-device "5h / Week / 3rd" bars are instead fed by a host companion,
+on-device "5h / Week / 3rd" bars (left column) and the "Go5h / GoWk /
+GoMo" bars (right column) are instead fed by a host companion,
 `scripts/quota_push.py` (backed by `codexbar --provider claude
---format json`), which writes extra heartbeat fields:
+--format json` for the Claude windows and a second, non-fatal
+`codexbar --provider opencodego --format json` call for the Go
+windows), which writes extra heartbeat fields:
 
 ```
 {
@@ -110,6 +113,12 @@ on-device "5h / Week / 3rd" bars are instead fed by a host companion,
   "week_color": C,         # RGB int for the Week bar fill
   "bar3_color": C,         # RGB int for the 3rd bar fill
   "bar3_label": "..."      # the 3rd bar's arbitrary name (e.g. "Daily Routines")
+  "go5h_util": N,          # opencodego usage.primary.usedPercent    (5-hour $12)
+  "gowk_util": N,          # opencodego usage.secondary.usedPercent  (weekly $30)
+  "gomo_util": N,          # opencodego usage.tertiary.usedPercent   (monthly $60)
+  "go5h_color": C,         # RGB int for the Go5h bar fill
+  "gowk_color": C,         # RGB int for the GoWk bar fill
+  "gomo_color": C,         # RGB int for the GoMo bar fill
 }
 ```
 
@@ -118,6 +127,13 @@ codexbar mapping for the first two was verified against the labeled usage
 API (`primary`==`five_hour`, `secondary`==`seven_day`). The device renders
 *remaining* = `100 - util` for the **bar length**, and shows `--` for any
 field it hasn't received (e.g. on the Claude.app link, which sends none).
+
+The Go windows come from the opencodego provider: `primary` is the 5-hour
+$12 window, `secondary` the weekly $30, `tertiary` the monthly $60. The Go
+fetch is **non-fatal** (own 15s timeout, broad except-list, never aborts
+the Claude push): on any failure or a partial snapshot the affected Go
+fields are omitted and the device shows `--` for those bars. Go bars carry
+**no expected-pace tick** (no `*_expected` keys), like the 3rd bar.
 
 The **3rd bar is a generic (name, value) slot**, not a fixed window. The
 device draws `bar3_label` verbatim, so the host decides what it represents.
@@ -130,16 +146,24 @@ should be short ASCII — the bar row only has room for a DejaVu9 (size 1)
 string before the bar.
 
 The `*_color` values are **plain RGB ints the device paints directly** —
-no colour logic on the device. The companion resolves them host-side from
-the codexbar **pace stage** (`farBehind`…`farAhead`; see
+no colour logic on the device. The **bar fill** is now a fixed provider
+**brand colour**: `0xCC785C` (Anthropic orange) for the left-column Claude
+bars (`five_h_color` / `week_color` / `bar3_color`) and `0x4D6BFE`
+(DeepSeek blue) for the right-column Go bars (`go5h_color` / `gowk_color` /
+`gomo_color`). Only the `*_expected_color` fields (5h/Week's expected-pace
+tick) remain pace-derived: the companion resolves them host-side from the
+codexbar **pace stage** (`farBehind`…`farAhead`; see
 [codexbar-pace.md](codexbar-pace.md) for the full response spec) on a
-green→red ramp
-(`*Behind`/reserve = green … `*Ahead`/deficit = red), with a remaining-%
-fallback where there's no stage (the 3rd bar always; 5h/Week when codexbar
-omits pace early in a window). Keeping the stage→colour map on the host
-means colours can be retuned without re-flashing the device. All these
+green→red ramp (`*Behind`/reserve = green … `*Ahead`/deficit = red, yellow
+on pace), with a remaining-% fallback where there's no stage (5h/Week when
+codexbar omits pace early in a window). Keeping the stage→colour map on the
+host means colours can be retuned without re-flashing the device. All these
 names are in the device's heartbeat-detection set (`_HEARTBEAT_FIELDS` in
 `buddy_protocol.py`) so a quota-only message is recognized as a heartbeat.
+The device-basic bundle recognises the same `bar3_*` and `go*` fields: its
+`_HEARTBEAT_FIELDS` migrated from the stale sonnet-era names to
+`bar3_util`/`bar3_color`/`bar3_label` alongside the Cardputer bundle, so
+both bundles accept the identical heartbeat.
 
 **Connection model:** the companion is the BLE central, like Claude.app,
 and a buddy accepts one central at a time — so the companion and

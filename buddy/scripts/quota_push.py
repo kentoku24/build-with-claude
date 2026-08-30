@@ -28,6 +28,26 @@ independent of codexbar's *data* (codexbar is still queried for the 5h/Week
 bars, so it must be installed either way). Older codexbar builds with a
 Sonnet `usage.tertiary` window are used as a last-resort fallback.
 
+**OpenCode Go** quota is fetched the same way, non-fatally: a second
+`codexbar --provider opencodego --format json` call (same `CODEXBAR_BIN`
+override, **15s timeout** — a cold start on the local opencode.db is
+~8-9s) whose `usage.{primary, secondary, tertiary}` windows map to three
+more bars:
+
+    primary   -> go5h_util + go5h_color  (5-hour $12 window)
+    secondary -> gowk_util + gowk_color  (weekly $30 window)
+    tertiary  -> gomo_util + gomo_color  (monthly $60 window)
+
+The Go fetch **degrades gracefully**: any failure (missing binary,
+timeout, non-zero exit, bad JSON, or a partial `isBalanceOnly`-style
+snapshot with missing windows) prints a `quota_push: opencodego fetch
+failed/partial: <reason>` note to stderr and omits the affected Go
+fields, so the device shows "--" for those bars and the Claude push is
+**never** aborted — unlike `_read_codexbar`, the Go path never calls
+SystemExit. Go bars carry **no expected-pace tick** (a decision): their
+colour is the remaining-% fallback only. `--no-opencode-go` skips the Go
+fetch entirely.
+
 The full codexbar response shape (usage + pace, stage enum, guards) is
 documented in buddy/references/codexbar-pace.md — the released CLI
 (verified v0.48.0) provides pace with `--provider claude`, and this file
@@ -79,6 +99,7 @@ reconnect from Claude.app for the approval workflow.
     python quota_push.py --bar3-id claude-routines   # pick the 3rd-bar extra window
     python quota_push.py --bar3-label Routines       # rename the 3rd bar
     python quota_push.py --bar3-label Focus --bar3-value 42  # static arbitrary bar
+    python quota_push.py --no-opencode-go           # skip the OpenCode Go fetch
 
 Run it from **Terminal.app**, not from inside another app's shell —
 macOS Bluetooth permission is per-binary, so an indirectly-launched
@@ -119,6 +140,16 @@ _STAGE_COLORS = {
     "ahead":          0xFF5500,
     "farAhead":       0xFF0000,  # red    — heavy deficit
 }
+
+# Bar-fill brand colours (RGB int 0xRRGGBB). Unlike the pace ramp, the bar
+# fill is now the provider's brand colour so the columns read as
+# "Claude/Anthropic" and "OpenCode Go" at a glance. 0xCC785C is the same
+# Anthropic orange the device-basic UI theme already uses; 0x4D6BFE is
+# DeepSeek's brand blue (OpenCode Go is powered by DeepSeek). The expected
+# pace tick still uses _line_color_for (green/red/yellow) — these constants
+# only drive the bar fill itself.
+_CLAUDE_BAR_COLOR = 0xCC785C  # Anthropic orange — fill for 5h / Week / 3rd (Claude) bars
+_GO_BAR_COLOR = 0x4D6BFE      # DeepSeek blue — fill for Go5h / GoWk / GoMo (OpenCode Go) bars
 
 
 def _color_for(util, stage):
@@ -262,7 +293,55 @@ def _read_codexbar(bar3_id=None, bar3_label=None, bar3_value=None):
     }
 
 
-def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None):
+def _read_opencodego(no_go=False):
+    """Fetch OpenCode Go usage from codexbar, non-fatally.
+
+    Runs `codexbar --provider opencodego --format json` (same CODEXBAR_BIN
+    override as the claude fetch, own 15s timeout) and maps
+    `usage.{primary, secondary, tertiary}` to `go5h` (5-hour $12),
+    `gowk` (weekly $30), `gomo` (monthly $60), each a used%|None.
+
+    The whole body is wrapped in a broad except that returns {} on ANY
+    failure — unlike `_read_codexbar` this NEVER raises SystemExit, so a
+    Go failure can't abort the Claude push. A missing window (partial /
+    isBalanceOnly snapshot) yields None for that window only. On any
+    failure or omitted window a `quota_push: opencodego fetch
+    failed/partial: <reason>` note goes to stderr, so a silent {} isn't
+    mistaken for a healthy "0 usage".
+    """
+    if no_go:
+        return {}
+    try:
+        out = subprocess.run(
+            [CODEXBAR_BIN, "--provider", "opencodego", "--format", "json"],
+            capture_output=True, text=True, check=True, timeout=15,
+        ).stdout
+        data = json.loads(out)
+        entry = data[0] if data else {}
+        usage = entry.get("usage") or {}
+
+        def used(section):
+            u = (usage.get(section) or {}).get("usedPercent")
+            return None if u is None else int(round(u))
+
+        go = {
+            "go5h": used("primary"),
+            "gowk": used("secondary"),
+            "gomo": used("tertiary"),
+        }
+    except (FileNotFoundError, subprocess.TimeoutExpired,
+            subprocess.CalledProcessError, json.JSONDecodeError,
+            IndexError, KeyError, TypeError) as e:
+        print("quota_push: opencodego fetch failed: %s" % e, file=sys.stderr)
+        return {}
+    missing = [name for name, u in go.items() if u is None]
+    if missing:
+        print("quota_push: opencodego fetch failed/partial: missing window(s) %s"
+              % ", ".join(missing), file=sys.stderr)
+    return go
+
+
+def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None, no_go=False):
     """Build the heartbeat dict: per window, `<name>_util` (bar length =
     100-util) and `<name>_color` (RGB int the device paints directly).
     Colour resolution happens here, host-side, so it's tunable without a
@@ -274,10 +353,18 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None):
     The generic 3rd bar adds `bar3_label` (its arbitrary name) alongside
     `bar3_util` / `bar3_color`; it carries no pace, so no expected tick.
 
-    e.g. {"five_h_util": 14, "five_h_color": 65280, "five_h_expected": 27,
+    OpenCode Go adds `go5h` / `gowk` / `gomo` (`<name>_util` +
+    `<name>_color`) from the non-fatal `_read_opencodego` fetch. Go bars
+    carry no expected tick (decision): their colour is the remaining-%
+    fallback. All Go fields are omitted on any Go error — the Claude
+    push always survives. `no_go=True` skips the Go fetch entirely.
+
+    e.g. {"five_h_util": 14, "five_h_color": 13397084, "five_h_expected": 27,
           "five_h_expected_color": 65280, "week_util": 13,
-          "week_color": 16755200, "bar3_label": "Daily Routines",
-          "bar3_util": 0, "bar3_color": 65280}
+          "week_color": 13397084, "bar3_label": "Daily Routines",
+          "bar3_util": 0, "bar3_color": 13397084, "go5h_util": 1,
+          "go5h_color": 5070846, "gowk_util": 3, "gowk_color": 5070846,
+          "gomo_util": 16, "gomo_color": 5070846}
     """
     raw = _read_codexbar(bar3_id, bar3_label, bar3_value)
     hb = {}
@@ -286,9 +373,9 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None):
         if util is None:
             continue
         hb[name + "_util"] = util
-        color = _color_for(util, stage)
-        if color is not None:
-            hb[name + "_color"] = color
+        # Bar fill is the provider brand colour (Anthropic orange); the
+        # expected-pace tick below keeps its green/red/yellow stage colours.
+        hb[name + "_color"] = _CLAUDE_BAR_COLOR
         # Expected-pace tick: only when codexbar gave us a baseline and a
         # classifiable stage (5h / Week only).
         if expected is not None:
@@ -297,16 +384,23 @@ def fetch_quota(bar3_id=None, bar3_label=None, bar3_value=None):
                 hb[name + "_expected"] = expected
                 hb[name + "_expected_color"] = line_color
     # The generic 3rd bar: a host-named (label, value) slot with no pace, so
-    # its colour uses the remaining-% fallback (_color_for with stage=None).
+    # it carries the Claude brand colour too.
     bar3 = raw.get("bar3")
     if bar3 is not None:
         label, util = bar3
         if util is not None:
             hb["bar3_label"] = label
             hb["bar3_util"] = util
-            color = _color_for(util, None)
-            if color is not None:
-                hb["bar3_color"] = color
+            hb["bar3_color"] = _CLAUDE_BAR_COLOR
+    # OpenCode Go windows: non-fatal, DeepSeek-blue fill (no expected tick),
+    # all omitted on any error / when --no-opencode-go is set.
+    go = _read_opencodego(no_go)
+    for name in ("go5h", "gowk", "gomo"):
+        util = go.get(name)
+        if util is None:
+            continue
+        hb[name + "_util"] = util
+        hb[name + "_color"] = _GO_BAR_COLOR
     return hb
 
 
@@ -325,7 +419,7 @@ async def _find_device(name_prefix: str, timeout: float = 8.0):
 
 
 async def _run(address, name_prefix, interval, once,
-               bar3_id=None, bar3_label=None, bar3_value=None):
+               bar3_id=None, bar3_label=None, bar3_value=None, no_go=False):
     from bleak import BleakClient
 
     target = address
@@ -344,7 +438,7 @@ async def _run(address, name_prefix, interval, once,
         print("connected; pushing quota every %ds (Ctrl-C to stop)" % interval)
         while True:
             try:
-                hb = fetch_quota(bar3_id, bar3_label, bar3_value)
+                hb = fetch_quota(bar3_id, bar3_label, bar3_value, no_go)
                 await client.write_gatt_char(NUS_RX_UUID, _heartbeat_line(hb), response=False)
                 print("pushed %s" % hb)
             except Exception as e:  # keep the link up across transient errors
@@ -378,6 +472,9 @@ def main(argv=None):
                     help="force a static 0..100 value for the 3rd bar, "
                          "independent of codexbar's data (codexbar is still "
                          "queried for 5h/Week; pair with --bar3-label)")
+    ap.add_argument("--no-opencode-go", action="store_true",
+                    help="skip the OpenCode Go fetch (escape hatch; "
+                         "default: fetch Go)")
     args = ap.parse_args(argv)
 
     if args.dry_run:
@@ -385,8 +482,7 @@ def main(argv=None):
         for name, label in (("five_h", "5h"), ("week", "Week")):
             util, stage, expected = raw[name]
             rem = "--" if util is None else "%d%%" % (100 - util)
-            color = _color_for(util, stage)
-            color_s = "n/a" if color is None else "0x%06X" % color
+            color_s = "n/a" if util is None else "0x%06X" % _CLAUDE_BAR_COLOR
             if expected is None:
                 exp_s = "--"
             else:
@@ -404,15 +500,29 @@ def main(argv=None):
             why = "no source" if bar3 is None else "%r has no value" % bar3[0]
             print("%-14s: -- (not pushed; %s)" % ("3rd bar", why))
         else:
-            color = _color_for(b_util, None)
-            color_s = "n/a" if color is None else "0x%06X" % color
+            color_s = "0x%06X" % _CLAUDE_BAR_COLOR
             print("%-14s: %d%% remaining  stage=%-13s color=%s  expected=%s" % (
                 bar3[0], 100 - b_util, "n/a", color_s, "--"))
+        # OpenCode Go rows (non-fatal, no expected tick). Mirror fetch_quota:
+        # a window with no value is *not* pushed, so report it as "not pushed".
+        go = _read_opencodego(args.no_opencode_go)
+        for name, label in (("go5h", "Go5h"), ("gowk", "GoWk"), ("gomo", "GoMo")):
+            util = go.get(name)
+            if util is None:
+                continue
+            color_s = "0x%06X" % _GO_BAR_COLOR
+            print("%-14s: %d%% remaining  stage=%-13s color=%s  expected=%s" % (
+                label, 100 - util, "n/a", color_s, "--"))
+        if not any(go.get(n) is not None for n in ("go5h", "gowk", "gomo")):
+            why = ("disabled by --no-opencode-go" if args.no_opencode_go
+                   else "no Go usage data")
+            print("%-14s: -- (not pushed; %s)" % ("Go", why))
         return 0
 
     try:
         asyncio.run(_run(args.address, args.name_prefix, args.interval, args.once,
-                         args.bar3_id, args.bar3_label, args.bar3_value))
+                         args.bar3_id, args.bar3_label, args.bar3_value,
+                         args.no_opencode_go))
     except KeyboardInterrupt:
         print("\nstopped")
     except ImportError:

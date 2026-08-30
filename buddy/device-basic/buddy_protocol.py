@@ -15,11 +15,15 @@ Host → device messages (what we receive):
         "msg":"...", "entries":N, "tokens":N, "tokens_today":N,
         "prompt":{"id":"...","tool":"...","hint":"..."}}
     quota heartbeat from the BLE companion (scripts/quota_push.py):
-        {"five_h_util":N, "week_util":N, "sonnet_util":N}  - utilization %
-        (5-hour / 7-day-all / 7-day-Sonnet) from codexbar, plus matching
-        "*_color" RGB ints (host-resolved from the pace stage) for the bars,
-        and for 5h / Week "*_expected"+"*_expected_color" — the even-burn
-        baseline position and tick colour (CodexBar's expected-pace marker)
+        {"five_h_util":N, "week_util":N, "bar3_util":N,
+         "go5h_util":N, "gowk_util":N, "gomo_util":N}  - utilization %
+        (5-hour / 7-day-all / host-named 3rd bar / OpenCode Go 5-hour /
+        weekly / monthly) from codexbar, plus matching "*_color" RGB ints
+        (host-resolved from the pace stage) for the bars, and for 5h / Week
+        "*_expected"+"*_expected_color" — the even-burn baseline position and
+        tick colour (CodexBar's expected-pace marker). The 3rd bar carries a
+        host-supplied "bar3_label" (the device draws whatever name the host
+        sends). The Go bars (go5h/gowk/gomo) carry no expected ticks.
 
 Device → host messages (what we emit):
     {"ack":"status","name":..,"sec":true,"bat":{...},"sys":{...},"stats":{...}}
@@ -43,14 +47,19 @@ _HEARTBEAT_FIELDS = (
     "total", "running", "waiting", "tokens", "tokens_today", "entries",
     # Quota fields from the BLE companion (scripts/quota_push.py). Listed
     # here so a quota-only heartbeat — e.g. {"five_h_util":N,"week_util":N,
-    # "sonnet_util":N} with none of the Claude.app fields — is still
+    # "bar3_util":N} with none of the Claude.app fields — is still
     # recognized as a heartbeat and reaches the UI, instead of falling
     # through to "unclassified". *_color are RGB ints (resolved host-side
     # from the codexbar pace stage) that the device paints as the bar fill.
     # *_expected / *_expected_color (5h / Week only) position and colour the
     # expected-pace tick — the even-burn baseline marker mirroring CodexBar.
-    "five_h_util", "week_util", "sonnet_util",
-    "five_h_color", "week_color", "sonnet_color",
+    # bar3_* is the host-named 3rd bar (bar3_label drawn as its name); the
+    # go5h/gowk/gomo fields are the OpenCode Go bars and carry no expected
+    # ticks.
+    "five_h_util", "week_util", "bar3_util", "bar3_color", "bar3_label",
+    "five_h_color", "week_color",
+    "go5h_util", "gowk_util", "gomo_util",
+    "go5h_color", "gowk_color", "gomo_color",
     "five_h_expected", "week_expected",
     "five_h_expected_color", "week_expected_color",
 )

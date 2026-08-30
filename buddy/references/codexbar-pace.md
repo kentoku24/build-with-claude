@@ -1,10 +1,12 @@
 # codexbar JSON response — `usage` + `pace` reference
 
 `scripts/quota_push.py` reads `codexbar --provider claude --format json`
-to drive the device's quota bars. The **`pace`** part of that response is
-provided by the released CLI (verified on codexbar v0.48.0) and barely
-documented upstream — so this file is our captured, verified record of the
-shape we depend on.
+to drive the device's quota bars, plus a second
+`codexbar --provider opencodego --format json` call for the OpenCode Go
+bars (see the OpenCode Go section below). The **`pace`** part of the
+claude response is provided by the released CLI (verified on codexbar
+v0.48.0) and barely documented upstream, so this file is our captured,
+verified record of the shape we depend on.
 
 - **Captured from:** codexbar `version` `2.1.186` (the `version` field is in
   each entry — check it if the shape below ever stops matching).
@@ -75,7 +77,7 @@ was Sonnet — could differ for accounts that use Opus.)
 
 ---
 
-## `pace` — consumption pace (bar colour source)
+## `pace` — consumption pace (expected-pace tick colour source)
 
 Pace answers: *within a window, how far ahead/behind an even-burn baseline
 is my actual usage?* Baseline = `expectedUsedPercent` (the % you'd be at if
@@ -88,9 +90,12 @@ you spent the window evenly over elapsed time).
 }
 ```
 
-> **Only `primary` and `secondary` ever carry pace.** `tertiary` and the
-> `extraRateWindows` never do.
-> The buddy therefore colours its generic 3rd bar by a remaining-% fallback, not pace.
+> **Only `primary` and `secondary` ever carry pace (claude provider).**
+> `tertiary` and the `extraRateWindows` never do for claude.
+> The buddy's bar *fill* is the provider brand colour (Claude orange /
+> Go blue) regardless of pace; pace only drives the small expected-pace tick
+> (`*_expected_color`), so a window with no pace simply gets no tick.
+> The opencodego provider is different: it CAN emit `pace.tertiary` (see below).
 
 ### Per-window fields
 
@@ -156,7 +161,8 @@ omitted, and if neither `primary` nor `secondary` qualifies the whole
 7. **`expectedUsedPercent ≥ 3`** — no pace early in a window.
 
 → Consumers must handle `pace`, `pace.primary`, or `pace.secondary` being
-missing. `quota_push.py` does: no stage → remaining-% colour fallback.
+missing. `quota_push.py` does: no stage → no expected-pace tick (the bar
+fill stays the fixed provider brand colour regardless).
 
 ### CLI vs GUI (caveat)
 
@@ -199,22 +205,82 @@ window can differ between `codexbar` CLI and the GUI. **Session (5h) matches.**
 }
 ```
 
-Note: `pace` has no `tertiary`; `primary.willLastToReset=true` so its
-`etaSeconds` is omitted; no `runOutProbability` anywhere.
+Note (claude provider): `pace` has no `tertiary`; `primary.willLastToReset=true`
+so its `etaSeconds` is omitted; no `runOutProbability` anywhere.
 
 ---
 
 ## How `quota_push.py` consumes this
 
-| device bar | name from | length from | colour from |
-|---|---|---|---|
-| 5h     | (fixed)                  | `usage.primary.usedPercent`   | `pace.primary.stage`   → `_STAGE_COLORS` |
-| Week   | (fixed)                  | `usage.secondary.usedPercent` | `pace.secondary.stage` → `_STAGE_COLORS` |
-| 3rd    | `extraRateWindows[*].title` (default) | `extraRateWindows[*].window.usedPercent` (default) | **no pace** → remaining-% fallback |
+| device bar | name from | length from | fill colour from | tick colour from |
+|---|---|---|---|---|
+| 5h     | (fixed)                  | `usage.primary.usedPercent`   | Claude brand orange `0xCC785C` | `pace.primary.stage` → `_line_color_for` (green/red/yellow) |
+| Week   | (fixed)                  | `usage.secondary.usedPercent` | Claude brand orange `0xCC785C` | `pace.secondary.stage` → `_line_color_for` (green/red/yellow) |
+| 3rd    | `extraRateWindows[*].title` (default) | `extraRateWindows[*].window.usedPercent` (default) | Claude brand orange `0xCC785C` | **no tick** (no pace) |
+| Go5h   | (fixed)                  | opencodego `usage.primary.usedPercent`   | Go brand blue `0x4D6BFE` | **no tick** (by decision) |
+| GoWk   | (fixed)                  | opencodego `usage.secondary.usedPercent` | Go brand blue `0x4D6BFE` | **no tick** (by decision) |
+| GoMo   | (fixed)                  | opencodego `usage.tertiary.usedPercent`  | Go brand blue `0x4D6BFE` | **no tick** (by decision) |
 
-The host resolves stage→RGB (`_STAGE_COLORS`, green=reserve … red=deficit)
-and a remaining-% fallback for any window with no stage (the 3rd bar always,
-or the 5h/Week windows when a Guard above suppressed pace), then sends
-`<name>_util` + `<name>_color` per heartbeat — plus `bar3_label` for the 3rd
-bar's name. See
+The bar fill is the fixed provider brand colour (`0xCC785C` Claude orange /
+`0x4D6BFE` Go blue) — constant, independent of pace. Pace only drives the
+expected-pace tick: the host resolves stage→RGB
+(`_line_color_for`, green=reserve … red=deficit, yellow on pace) and sends
+`<name>_util` + `<name>_color` per heartbeat, plus `bar3_label` for the 3rd
+bar's name, and `*_expected` + `*_expected_color` for 5h/Week when a
+classifiable stage is present. See
 [protocol.md](protocol.md#quota-fields-from-the-ble-companion-not-claudeapp).
+
+---
+
+## OpenCode Go provider (`codexbar --provider opencodego`)
+
+`quota_push.py` also queries the **OpenCode Go** provider for the
+right-hand column of bars. Its response shape differs from the claude
+provider above, so it gets its own captured record. Live shape from this
+machine's `codexbar --provider opencodego --format json`:
+
+```jsonc
+[
+  {
+    "source": "local",              // or "web" when the account API is reachable
+    "provider": "opencodego",
+    "usage": {
+      "primary":   { "usedPercent": 1,  "windowMinutes": 300,   "resetsAt": "...", "resetDescription": "..." },
+      "secondary": { "usedPercent": 3,  "windowMinutes": 10080, "resetsAt": "...", "resetDescription": "..." },
+      "tertiary":  { "usedPercent": 16, "windowMinutes": 43200, "resetsAt": "...", "resetDescription": "..." }
+    },
+    "pace": {
+      "tertiary": { "stage": "farBehind", "expectedUsedPercent": 37, "deltaPercent": -21, "willLastToReset": true, "summary": "..." }
+    }
+  }
+]
+```
+
+- The windows map to the three Go bars: `primary` → `go5h_util` (5-hour
+  $12), `secondary` → `gowk_util` (weekly $30), `tertiary` → `gomo_util`
+  (monthly $60), each `usedPercent` read with the same `.get()`-chaining
+  as the claude path.
+- **`pace` CAN appear, including `pace.tertiary`.** The "only primary and
+  secondary ever carry pace" statement above is scoped to the **claude**
+  provider. Live-verified on this machine:
+  `"pace":{"tertiary":{"stage":"farBehind","expectedUsedPercent":37,"deltaPercent":-21,"willLastToReset":true,...}}`.
+  A future consumer must not assume the opencodego shape is pace-free.
+- **The local SQLite source computes only `usagePercent`.** The local
+  reader sums session/week/month cost rows and divides by the plan limit
+  (`OpenCodeGoLocalUsageReader.swift:183-204` in the CodexBar source); it
+  never derives pace. The `pace.tertiary` seen in live output therefore
+  comes from the web/non-local path or a different computation, so treat
+  opencodego pace as best-effort, not guaranteed.
+- **Anchored-monthly reset math.** The monthly window is anchored to the
+  *earliest* stored usage row, not a calendar month:
+  `monthBounds(now:anchorMs:)` with `anchorMs = earliest createdMs`
+  (`OpenCodeGoLocalUsageReader.swift:190-204`) picks the billing month
+  containing `now`, and `monthlyResetInSec` counts down to that bucket's
+  end. So "monthly" is the current anchor-month bucket, and its bounds
+  shift with the oldest row in the DB.
+- **We skip the expected-pace tick for Go bars by decision**, not because
+  the data can't contain pace: `quota_push.py` gives the Go bars a fixed
+  DeepSeek-blue fill (`0x4D6BFE`) and sends no `*_expected` keys, matching
+  the generic 3rd-bar precedent. (The device-basic bundle renders the host's
+  brand colours — Claude orange `0xCC785C` / Go blue `0x4D6BFE` — for the
+  bar fill; pace only ever drives the 5h/Week expected-pace tick.)

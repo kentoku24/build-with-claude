@@ -23,7 +23,7 @@ Open Claude → Developer menu → **Hardware Buddy** → Connect. BLE-only. Sta
 
 ## Quota bars (BLE companion)
 
-The **5h / Week** bars plus a **configurable 3rd bar** show the real account quota. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider claude --format json` and writes `five_h_util` / `week_util` / `bar3_util` heartbeats to the device, which renders `100 − utilization` for each.
+The **5h / Week / 3rd** bars (left column) and the **Go5h / GoWk / GoMo** bars (right column) show the real account quota: six bars in two columns of three. The device-basic bundle renders all six; the Cardputer reads the same heartbeat and ignores the Go fields. Claude.app's heartbeat doesn't carry quota, and the device is BLE-only so it can't reach usage itself. A host companion, [`scripts/quota_push.py`](scripts/quota_push.py), bridges the gap: it reads `codexbar --provider claude --format json` and writes `five_h_util` / `week_util` / `bar3_util` heartbeats to the device, which renders `100 − utilization` for each.
 
 The **3rd bar is a generic name + value slot** — the device draws whatever `bar3_label` the host sends. By default the companion points it at a codexbar *extra-rate window* (`usage.extraRateWindows`, e.g. **"Daily Routines"**, which replaced the old Sonnet window in the codexbar GUI). Retarget or rename it without re-flashing:
 
@@ -33,7 +33,9 @@ python3 buddy/scripts/quota_push.py --bar3-label Routines         # rename the b
 python3 buddy/scripts/quota_push.py --bar3-label Focus --bar3-value 42  # static, arbitrary value
 ```
 
-The **bar length** is remaining quota; the **bar colour** reflects the codexbar *pace stage* — green when you're under the even-burn pace (reserve) through red when you're well ahead of it (deficit, on track to run out early). The 3rd bar has no pace, so it colours by remaining-%. The stage→colour map lives **in `quota_push.py` (`_STAGE_COLORS`)**, not on the device, so you can retune colours by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the heartbeat wire format, and [references/codexbar-pace.md](references/codexbar-pace.md) for the full codexbar `usage`/`pace` response spec (stage enum, guards, mapping).
+The **bar length** is remaining quota; the **bar fill colour** is the provider's **brand colour** — Claude/Anthropic orange (`0xCC785C`) for the left column (5h / Week / 3rd) and OpenCode Go / DeepSeek blue (`0x4D6BFE`) for the right column (Go5h / GoWk / GoMo) — so the two columns read as "Claude" and "OpenCode Go" at a glance. The small **expected-pace tick** beside 5h/Week is separate: it keeps the codexbar *pace stage* colours (green when you're under the even-burn pace / reserve, red when you're well ahead / deficit, yellow on pace). The tick's stage→colour map lives **in `quota_push.py` (`_line_color_for` / `_STAGE_COLORS`)**, not on the device, so you can retune it by editing the script and restarting it — no re-flash. See [references/protocol.md](references/protocol.md#quota-fields-from-the-ble-companion-not-claudeapp) for the heartbeat wire format, and [references/codexbar-pace.md](references/codexbar-pace.md) for the full codexbar `usage`/`pace` response spec (stage enum, guards, mapping).
+
+**The OpenCode Go bars** (right column: **Go5h / GoWk / GoMo**) track the OpenCode Go subscription's 5-hour $12, weekly $30, and monthly $60 windows. They come from a second, non-fatal `codexbar --provider opencodego --format json` call (local `~/.local/share/opencode/opencode.db`, or the web account API when reachable), which maps `usage.primary` / `usage.secondary` / `usage.tertiary` to `go5h_util` / `gowk_util` / `gomo_util` plus their `_color` fields. The Go fetch has its own **15s timeout** (a cold start on the local DB runs ~8-9s) and **degrades gracefully**: any failure prints a `quota_push: opencodego fetch failed/partial: ...` note to stderr and omits the Go fields, so the device shows `--` for those bars and the Claude push is never blocked. `--no-opencode-go` skips the Go fetch entirely. Go bars carry **no expected-pace tick** by decision; their fill uses the OpenCode Go / DeepSeek brand blue (`0x4D6BFE`).
 
 ### Show quota on the device — runbook
 
@@ -43,15 +45,19 @@ The **bar length** is remaining quota; the **bar colour** reflects the codexbar 
 pip install bleak          # BLE central library
 # codexbar must be on PATH and authenticated:
 codexbar --provider claude --format json   # should print usage JSON
+codexbar --provider opencodego --format json   # OpenCode Go bars (optional)
 ```
 
 Preview the numbers any time without a device or Bluetooth:
 
 ```bash
 python3 buddy/scripts/quota_push.py --dry-run
-# 5h            : 86% remaining  stage=farBehind     color=0x00FF00  expected=27% (0x00FF00)
-# Week          : 87% remaining  stage=slightlyAhead color=0xFFAA00  expected=11% (0xFF0000)
-# Daily Routines: 100% remaining stage=n/a           color=0x00FF00  expected=--
+# 5h            : 86% remaining  stage=farBehind     color=0xCC785C  expected=27% (0x00FF00)
+# Week          : 87% remaining  stage=slightlyAhead color=0xCC785C  expected=11% (0xFF0000)
+# Daily Routines: 100% remaining stage=n/a           color=0xCC785C  expected=--
+# Go5h          : 99% remaining  stage=n/a           color=0x4D6BFE  expected=--
+# GoWk          : 97% remaining  stage=n/a           color=0x4D6BFE  expected=--
+# GoMo          : 84% remaining  stage=n/a           color=0x4D6BFE  expected=--
 ```
 
 **Each time you want the bars live**
